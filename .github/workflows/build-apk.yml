@@ -32,8 +32,12 @@ jobs:
 
       - name: Install Android SDK
         run: |
-              yes | sdkmanager --licenses
-              sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+         export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+         export ANDROID_HOME="$ANDROID_SDK_ROOT"
+         export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+
+         yes | sdkmanager --licenses
+         sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" 
 
 
       
