@@ -15,7 +15,7 @@ export default function SettingsScreen() {
   return (
     <ScrollView style={{ backgroundColor: colors.background }} contentContainerStyle={[styles.content, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 110 }]} showsVerticalScrollIndicator={false}>
       <ScreenHeader eyebrow={isArabic ? 'التطبيق' : 'APPLICATION'} title={isArabic ? 'الإعدادات' : 'Settings'} subtitle={isArabic ? 'خصّص طريقة تعلّمك وحافظ على مساحة العمل.' : 'Customize your learning experience and workspace.'} />
-      <View style={[styles.brandCard, { backgroundColor: colors.editor }]}><AppMark /><Text style={[styles.brandVersion, { color: colors.editorMuted }]}>T-SQL educational engine · v1.0</Text></View>
+      <View style={[styles.brandCard, { backgroundColor: colors.editor }]}><AppMark /><Text style={[styles.brandVersion, { color: colors.editorMuted }]}>T-SQL educational engine · v1.0.0</Text></View>
       <Text style={[styles.groupLabel, { color: colors.mutedForeground }]}>{isArabic ? 'اللغة' : 'LANGUAGE'}</Text>
       <View style={[styles.optionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
         <View style={styles.optionIcon}><Feather name="globe" size={18} color={colors.primary} /></View><View style={styles.optionCopy}><Text style={[styles.optionTitle, { color: colors.foreground }]}>{isArabic ? 'لغة الواجهة' : 'Interface language'}</Text><Text style={[styles.optionSub, { color: colors.mutedForeground }]}>{isArabic ? 'العربية' : 'English'}</Text></View>
@@ -24,6 +24,15 @@ export default function SettingsScreen() {
       <Text style={[styles.groupLabel, { color: colors.mutedForeground }]}>{isArabic ? 'مساحة العمل' : 'WORKSPACE'}</Text>
       <Pressable testID="reset-workspace" onPress={confirmReset} style={[styles.optionCard, { backgroundColor: colors.card, borderColor: colors.border }]}><View style={[styles.optionIcon, { backgroundColor: '#FFF0EE' }]}><Feather name="trash-2" size={18} color={colors.destructive} /></View><View style={styles.optionCopy}><Text style={[styles.optionTitle, { color: colors.foreground }]}>{isArabic ? 'مسح قواعد البيانات' : 'Clear databases'}</Text><Text style={[styles.optionSub, { color: colors.mutedForeground }]}>{isArabic ? 'حذف كل البيانات المحلية وإعادة المحرر للدرس التجريبي' : 'Delete local data and restore the starter lesson'}</Text></View><Feather name="chevron-left" size={18} color={colors.mutedForeground} /></Pressable>
       <View style={styles.note}><Feather name="info" size={16} color={colors.primary} /><Text style={[styles.noteText, { color: colors.mutedForeground }]}>{isArabic ? 'هذا التطبيق محرك T-SQL تعليمي مستقل، وليس Microsoft SQL Server.' : 'This is an independent educational T-SQL engine, not Microsoft SQL Server.'}</Text></View>
+
+      <Text style={[styles.groupLabel, { color: colors.mutedForeground }]}>{isArabic ? 'حول التطبيق' : 'ABOUT APP'}</Text>
+      <View style={[styles.aboutCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+        <Text style={[styles.aboutTitle, { color: colors.foreground }]}>SQL Student Studio</Text>
+        <Text style={[styles.aboutMeta, { color: colors.mutedForeground }]}>{isArabic ? 'الإصدار 1.0.0' : 'Version 1.0.0'}</Text>
+        <Text style={[styles.aboutMeta, { color: colors.mutedForeground }]}>{isArabic ? 'المطور: محمد الفقيه' : 'Developer: Mohammed Al-Faqeeh'}</Text>
+        <Text style={[styles.aboutMeta, { color: colors.mutedForeground }]}>© 2026 {isArabic ? 'محمد الفقيه' : 'Mohammed Al-Faqeeh'}</Text>
+        <Text style={[styles.aboutMeta, { color: colors.mutedForeground }]}>{isArabic ? 'جميع الحقوق محفوظة' : 'All rights reserved'}</Text>
+      </View>
     </ScrollView>
   );
 }
@@ -43,4 +52,7 @@ const styles = StyleSheet.create({
   segmentText: { fontSize: 11, fontWeight: '700' },
   note: { flexDirection: 'row', gap: 9, padding: 12, marginTop: 8 },
   noteText: { flex: 1, fontSize: 12, lineHeight: 18 },
+  aboutCard: { borderWidth: 1, borderRadius: 17, padding: 16, gap: 6, alignItems: 'center' },
+  aboutTitle: { fontSize: 16, fontWeight: '700', marginBottom: 2 },
+  aboutMeta: { fontSize: 12, lineHeight: 18, textAlign: 'center' },
 });
