@@ -529,10 +529,106 @@ test('Educational Error Messages', () => {
   // Scalar subquery returning multiple rows
   res = executeScript(state, 'SELECT Name FROM Students WHERE Grade = (SELECT Grade FROM Students);');
   assert.ok(res.result.errors.length > 0);
-  assert.match(res.result.errors[0], /الاستعلام الفرعي/);
+  assert.match(res.result.errors[0], /Subquery returned more than one value/);
 
   // Set operator column count mismatch
   res = executeScript(state, 'SELECT Id, Name FROM Students UNION SELECT Name FROM Teachers;');
   assert.ok(res.result.errors.length > 0);
   assert.match(res.result.errors[0], /غير متطابق/);
+});
+
+/* ==========================================================================
+   ADVANCED & HARDENING REGRESSION TESTS
+   ========================================================================== */
+
+test('JOIN Column Ambiguity and Overwrite Prevention', () => {
+  const state = setupSampleDatabase();
+
+  // Unqualified 'Name' in JOIN projection must trigger Ambiguous column error
+  let res = executeScript(
+    state,
+    `SELECT Name FROM Students s INNER JOIN Departments d ON s.DepartmentID = d.ID;`
+  );
+  assert.ok(res.result.errors.length > 0);
+  assert.match(res.result.errors[0], /Ambiguous column 'Name'/i);
+
+  // Qualified s.Name and d.Name in SELECT * / projection work independently
+  res = executeScript(
+    state,
+    `SELECT s.Name AS StudentName, d.Name AS DeptName
+     FROM Students s
+     INNER JOIN Departments d ON s.DepartmentID = d.ID
+     WHERE s.Id = 1;`
+  );
+  assert.strictEqual(res.result.errors.length, 0);
+  assert.strictEqual(res.result.rows[0][0], 'Ali Hassan');
+  assert.strictEqual(res.result.rows[0][1], 'IT');
+});
+
+test('Chained Multiple Set Operators', () => {
+  const state = setupSampleDatabase();
+
+  const res = executeScript(
+    state,
+    `SELECT Name FROM Students WHERE DepartmentID = 1
+     UNION
+     SELECT Name FROM Students WHERE DepartmentID = 2
+     UNION
+     SELECT Name FROM Teachers;`
+  );
+
+  assert.strictEqual(res.result.errors.length, 0);
+  assert.strictEqual(res.result.rows.length, 6); // 2 dept 1 + 2 dept 2 + 2 teachers
+});
+
+test('NULL Semantics with Three-Valued Logic and NOT IN', () => {
+  const state = setupSampleDatabase();
+
+  // NULL = NULL evaluates to false
+  let res = executeScript(state, 'SELECT * FROM Students WHERE NULL = NULL;');
+  assert.strictEqual(res.result.errors.length, 0);
+  assert.strictEqual(res.result.rows.length, 0);
+
+  // NULL <> 5 evaluates to false
+  res = executeScript(state, 'SELECT * FROM Students WHERE NULL <> 5;');
+  assert.strictEqual(res.result.errors.length, 0);
+  assert.strictEqual(res.result.rows.length, 0);
+
+  // NOT IN with candidate set containing NULL evaluates to 0 rows
+  res = executeScript(
+    state,
+    `SELECT Name FROM Students WHERE Name NOT IN ('Ali Hassan', NULL);`
+  );
+  assert.strictEqual(res.result.errors.length, 0);
+  assert.strictEqual(res.result.rows.length, 0);
+});
+
+test('COUNT(col) ignoring NULL vs COUNT(*)', () => {
+  const state = setupSampleDatabase();
+
+  const res = executeScript(
+    state,
+    `SELECT COUNT(*) AS TotalCount, COUNT(Phone) AS PhoneCount FROM Students;`
+  );
+
+  assert.strictEqual(res.result.errors.length, 0);
+  assert.strictEqual(res.result.rows[0][0], '5'); // Total students
+  assert.strictEqual(res.result.rows[0][1], '3'); // Non-null phone count (2 NULLs ignored)
+});
+
+test('NOT LIKE Clause and Function Argument Validation', () => {
+  const state = setupSampleDatabase();
+
+  // NOT LIKE
+  let res = executeScript(
+    state,
+    `SELECT Name FROM Students WHERE Name NOT LIKE '%Ali%' ORDER BY Name;`
+  );
+  assert.strictEqual(res.result.errors.length, 0);
+  assert.strictEqual(res.result.rows.length, 3); // Ahmed Khaled, Ali Hassan (filtered), Mona Ali (filtered), Omar Farouk, Sara Mohamed
+
+  // Function with missing arguments returns educational error
+  res = executeScript(state, 'SELECT SUBSTRING(Name, 1) FROM Students;');
+  assert.ok(res.result.errors.length > 0);
+  assert.match(res.result.errors[0], /SUBSTRING/i);
 });

@@ -250,11 +250,11 @@ export function splitBatches(sql: string): string[] {
   return batches;
 }
 
-export function findKeywordOutside(value: string, keyword: string): number {
+export function findKeywordOutside(value: string, keyword: string, startIndex = 0): number {
   const target = keyword.toUpperCase();
   let depth = 0;
   let quote: "'" | '"' | null = null;
-  for (let i = 0; i <= value.length - target.length; i += 1) {
+  for (let i = startIndex; i <= value.length - target.length; i += 1) {
     const char = value[i];
     const next = value[i + 1];
     if (quote) {
@@ -346,26 +346,48 @@ function columnValueFromRow(row: StoredRow, colName: string, outerRow?: StoredRo
     return parseValue(colName);
   }
 
-  // 1. Exact or unqualified match in current row
-  const exactKey = rowKeys.find((k) => keyOf(k) === targetKey);
-  if (exactKey !== undefined) return row[exactKey];
-
-  // 2. Qualified colName, e.g. "s.Name" -> match field ending with ".Name" or matching table/alias
+  // 1. Qualified colName, e.g. "s.Name" or "Students.Name"
   if (targetKey.includes('.')) {
+    const exactMatch = rowKeys.find((k) => keyOf(k) === targetKey);
+    if (exactMatch !== undefined) return row[exactMatch];
+
     const parts = targetKey.split('.');
     const fieldName = parts[parts.length - 1];
-    const match = rowKeys.find((k) => keyOf(k) === targetKey || keyOf(k).endsWith(`.${fieldName}`));
-    if (match !== undefined) return row[match];
-  } else {
-    // Unqualified column name, e.g. "Name" -> look for any key ending with ".Name"
-    const matches = rowKeys.filter((k) => {
-      const kParts = keyOf(k).split('.');
-      return kParts[kParts.length - 1] === targetKey;
-    });
-    if (matches.length === 1) return row[matches[0]];
-    if (matches.length > 1) {
-      throw new Error(`العمود "${colName}" غامض لاستخدامه في أكثر من جدول. استخدم Alias لتحديده.`);
+    const endingMatches = rowKeys.filter((k) => keyOf(k) === targetKey || keyOf(k).endsWith(`.${fieldName}`));
+    if (endingMatches.length === 1) return row[endingMatches[0]];
+    if (endingMatches.length > 1) {
+      const aliasMatch = endingMatches.find((k) => keyOf(k).startsWith(`${parts[0]}.`));
+      if (aliasMatch !== undefined) return row[aliasMatch];
     }
+  } else {
+    // 2. Unqualified column name, e.g. "Name"
+    // Find all distinct source table IDs represented in row for this field
+    const sourceTableIds = new Set<string>();
+    const sourceKeys: string[] = [];
+
+    for (const k of rowKeys) {
+      if (keyOf(k) === targetKey) {
+        sourceKeys.push(k);
+      }
+      if (k.includes('::')) {
+        const [sourceId, field] = k.split('::');
+        if (keyOf(field) === targetKey) {
+          sourceTableIds.add(sourceId);
+          sourceKeys.push(k);
+        }
+      }
+    }
+
+    if (sourceTableIds.size > 1) {
+      throw new Error(`Ambiguous column '${colName}'. Use a table name or alias, for example s.${colName}.`);
+    }
+
+    if (sourceKeys.length > 0) {
+      return row[sourceKeys[0]];
+    }
+
+    const exactMatch = rowKeys.find((k) => keyOf(k) === targetKey);
+    if (exactMatch !== undefined) return row[exactMatch];
   }
 
   // 3. Fallback to outer row (for correlated subqueries)
@@ -376,14 +398,19 @@ function columnValueFromRow(row: StoredRow, colName: string, outerRow?: StoredRo
   throw new Error(`العمود "${colName}" غير موجود.`);
 }
 
-function compareValues(left: SqlValue, operator: string, right: SqlValue): boolean {
-  if (left === null || right === null) return false;
+function compareValues(left: SqlValue, operator: string, right: SqlValue): boolean | null {
+  // Three-Valued Logic: Comparisons with NULL return UNKNOWN (null)
+  if (left === null || right === null) return null;
+
   const op = operator.trim().toUpperCase();
   if (op === '=' || op === '==') {
     if (typeof left === 'number' && typeof right === 'number') return left === right;
     return String(left).toLowerCase() === String(right).toLowerCase();
   }
-  if (op === '<>' || op === '!=') return !compareValues(left, '=', right);
+  if (op === '<>' || op === '!=') {
+    const eq = compareValues(left, '=', right);
+    return eq === null ? null : !eq;
+  }
 
   if (typeof left === 'number' && typeof right === 'number') {
     if (op === '>') return left > right;
@@ -439,7 +466,7 @@ export function evaluateExpression(
     const subRes = executeSelectInternal(subSql, engineState, row);
     if (subRes.error) throw new Error(subRes.error);
     if (subRes.rows.length > 1 || (subRes.columns.length > 1 && subRes.rows.length > 0)) {
-      throw new Error('الاستعلام الفرعي يرجع أكثر من صف أو أكثر من عمود عندما يُتوقع قيمة مفردة (Scalar Value).');
+      throw new Error('Subquery returned more than one value where a single value was expected.');
     }
     if (subRes.rows.length === 0) return null;
     return parseValue(subRes.rows[0][0]);
@@ -464,7 +491,7 @@ export function evaluateExpression(
   // 4. Logical NOT
   if (/^NOT\s+/i.test(expr)) {
     const res = evaluateExpression(expr.replace(/^NOT\s+/i, ''), row, outerRow, engineState, groupRows);
-    return !Boolean(res);
+    return res === null ? null : !Boolean(res);
   }
 
   // 5. CASE WHEN THEN ... ELSE ... END
@@ -485,7 +512,10 @@ export function evaluateExpression(
     const val = evaluateExpression(betweenMatch[1], row, outerRow, engineState, groupRows);
     const low = evaluateExpression(betweenMatch[3], row, outerRow, engineState, groupRows);
     const high = evaluateExpression(betweenMatch[4], row, outerRow, engineState, groupRows);
-    const isBetween = compareValues(val, '>=', low) && compareValues(val, '<=', high);
+    const ge = compareValues(val, '>=', low);
+    const le = compareValues(val, '<=', high);
+    if (ge === null || le === null) return null;
+    const isBetween = ge && le;
     return betweenMatch[2] ? !isBetween : isBetween;
   }
 
@@ -493,6 +523,8 @@ export function evaluateExpression(
   const inMatch = expr.match(/^(.+?)\s+(NOT\s+)?IN\s*\(([\s\S]+)\)$/i);
   if (inMatch && findKeywordOutside(expr, 'IN') >= 0) {
     const val = evaluateExpression(inMatch[1], row, outerRow, engineState, groupRows);
+    if (val === null) return null;
+
     const inBody = inMatch[3].trim();
     let candidates: SqlValue[] = [];
     if (/^SELECT\b/i.test(inBody) && engineState) {
@@ -502,8 +534,19 @@ export function evaluateExpression(
     } else {
       candidates = splitTopLevel(inBody).map((item) => evaluateExpression(item, row, outerRow, engineState, groupRows));
     }
-    const isIn = candidates.some((cand) => compareValues(val, '=', cand));
-    return inMatch[2] ? !isIn : isIn;
+
+    const hasNullCandidate = candidates.some((c) => c === null);
+    const matched = candidates.some((c) => compareValues(val, '=', c) === true);
+
+    if (inMatch[2]) {
+      if (matched) return false;
+      if (hasNullCandidate) return null;
+      return true;
+    }
+
+    if (matched) return true;
+    if (hasNullCandidate) return null;
+    return false;
   }
 
   // 9. EXISTS / NOT EXISTS Subquery
@@ -516,17 +559,26 @@ export function evaluateExpression(
     return existsMatch[1] ? !exists : exists;
   }
 
-  // 10. LIKE outside parentheses
+  // 10. LIKE / NOT LIKE
+  const notLikeMatch = expr.match(/^(.+?)\s+NOT\s+LIKE\s+(.+)$/i);
+  if (notLikeMatch && findKeywordOutside(expr, 'LIKE') >= 0) {
+    const val = evaluateExpression(notLikeMatch[1], row, outerRow, engineState, groupRows);
+    const patternVal = evaluateExpression(notLikeMatch[2], row, outerRow, engineState, groupRows);
+    if (val === null || patternVal === null) return null;
+    const pattern = String(patternVal).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.');
+    return !new RegExp(`^${pattern}$`, 'i').test(String(val));
+  }
+
   const likeMatch = expr.match(/^(.+?)\s+LIKE\s+(.+)$/i);
   if (likeMatch && findKeywordOutside(expr, 'LIKE') >= 0) {
     const val = evaluateExpression(likeMatch[1], row, outerRow, engineState, groupRows);
     const patternVal = evaluateExpression(likeMatch[2], row, outerRow, engineState, groupRows);
-    if (val === null || patternVal === null) return false;
+    if (val === null || patternVal === null) return null;
     const pattern = String(patternVal).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/%/g, '.*').replace(/_/g, '.');
     return new RegExp(`^${pattern}$`, 'i').test(String(val));
   }
 
-  // 11. Function Calls (e.g. UPPER(col), IIF(...), COUNT(*), etc.)
+  // 11. Function Calls
   const fnMatch = expr.match(/^([A-Z0-9_]+)\s*\(([\s\S]*)\)$/i);
   if (fnMatch) {
     const fnName = fnMatch[1].toUpperCase();
@@ -534,7 +586,7 @@ export function evaluateExpression(
     return evaluateBuiltInFunction(fnName, argsRaw, row, outerRow, engineState, groupRows);
   }
 
-  // 12. Comparison operators (=, <>, !=, >=, <=, >, <) OUTSIDE parentheses
+  // 12. Comparison operators
   const compOp = findOperatorOutside(expr, ['<>', '!=', '>=', '<=', '=', '>', '<']);
   if (compOp) {
     const leftVal = evaluateExpression(expr.slice(0, compOp.index), row, outerRow, engineState, groupRows);
@@ -563,7 +615,7 @@ function evaluateCaseExpression(
   engineState?: EngineState,
   groupRows?: StoredRow[]
 ): SqlValue {
-  const body = expr.slice(4, -3).trim(); // Remove CASE and END
+  const body = expr.slice(4, -3).trim();
   let elseVal: SqlValue = null;
 
   const elseIdx = findKeywordOutside(body, 'ELSE');
@@ -573,7 +625,6 @@ function evaluateCaseExpression(
     elseVal = evaluateExpression(body.slice(elseIdx + 4).trim(), row, outerRow, engineState, groupRows);
   }
 
-  // Parse WHEN ... THEN pairs
   const whenParts: { condition: string; result: string }[] = [];
   const matches = Array.from(whenBody.matchAll(/\bWHEN\b([\s\S]+?)\bTHEN\b([\s\S]+?)(?=\bWHEN\b|$)/gi));
   for (const m of matches) {
@@ -605,7 +656,13 @@ function evaluateBuiltInFunction(
     case 'COUNT': {
       const rowsToAggregate = groupRows ?? [row];
       if (argsRaw === '*' || argsRaw === '1') return rowsToAggregate.length;
-      return rowsToAggregate.filter((r) => evaluateExpression(argsRaw, r, outerRow, engineState) !== null).length;
+      return rowsToAggregate.filter((r) => {
+        try {
+          return evaluateExpression(argsRaw, r, outerRow, engineState) !== null;
+        } catch {
+          return false;
+        }
+      }).length;
     }
     case 'SUM': {
       const rowsToAggregate = groupRows ?? [row];
@@ -639,7 +696,7 @@ function evaluateBuiltInFunction(
       for (const r of rowsToAggregate) {
         const v = evaluateExpression(argsRaw, r, outerRow, engineState);
         if (v !== null) {
-          if (max === null || compareValues(v, '>', max)) max = v;
+          if (max === null || compareValues(v, '>', max) === true) max = v;
         }
       }
       return max;
@@ -650,7 +707,7 @@ function evaluateBuiltInFunction(
       for (const r of rowsToAggregate) {
         const v = evaluateExpression(argsRaw, r, outerRow, engineState);
         if (v !== null) {
-          if (min === null || compareValues(v, '<', min)) min = v;
+          if (min === null || compareValues(v, '<', min) === true) min = v;
         }
       }
       return min;
@@ -667,12 +724,14 @@ function evaluateBuiltInFunction(
     }
     case 'LEFT': {
       const args = evaluateArgList();
+      if (args.length < 2 || args[0] === undefined || args[1] === undefined) throw new Error('LEFT function requires 2 arguments.');
       if (args[0] === null || args[1] === null) return null;
       const len = Math.max(0, Number(args[1]));
       return String(args[0]).substring(0, len);
     }
     case 'RIGHT': {
       const args = evaluateArgList();
+      if (args.length < 2 || args[0] === undefined || args[1] === undefined) throw new Error('RIGHT function requires 2 arguments.');
       if (args[0] === null || args[1] === null) return null;
       const str = String(args[0]);
       const len = Math.max(0, Number(args[1]));
@@ -684,11 +743,13 @@ function evaluateBuiltInFunction(
     }
     case 'REPLACE': {
       const args = evaluateArgList();
+      if (args.length < 3) throw new Error('REPLACE function requires 3 arguments.');
       if (args[0] === null || args[1] === null || args[2] === null) return null;
       return String(args[0]).replaceAll(String(args[1]), String(args[2]));
     }
     case 'SUBSTRING': {
       const args = evaluateArgList();
+      if (args.length < 3) throw new Error('SUBSTRING function requires 3 arguments.');
       if (args[0] === null || args[1] === null || args[2] === null) return null;
       const str = String(args[0]);
       const start = Math.max(1, Number(args[1])) - 1;
@@ -697,6 +758,7 @@ function evaluateBuiltInFunction(
     }
     case 'CHARINDEX': {
       const args = evaluateArgList();
+      if (args.length < 2) throw new Error('CHARINDEX function requires at least 2 arguments.');
       if (args[0] === null || args[1] === null) return null;
       const sub = String(args[0]).toLowerCase();
       const str = String(args[1]).toLowerCase();
@@ -737,6 +799,7 @@ function evaluateBuiltInFunction(
     }
     case 'STUFF': {
       const args = evaluateArgList();
+      if (args.length < 4) throw new Error('STUFF function requires 4 arguments.');
       if (args[0] === null || args[1] === null || args[2] === null || args[3] === null) return null;
       const str = String(args[0]);
       const start = Number(args[1]) - 1;
@@ -768,6 +831,7 @@ function evaluateBuiltInFunction(
     }
     case 'POWER': {
       const args = evaluateArgList();
+      if (args.length < 2) throw new Error('POWER function requires 2 arguments.');
       if (args[0] === null || args[1] === null) return null;
       return Math.pow(Number(args[0]), Number(args[1]));
     }
@@ -802,6 +866,7 @@ function evaluateBuiltInFunction(
     }
     case 'DATEPART': {
       const rawArgs = splitTopLevel(argsRaw);
+      if (rawArgs.length < 2) throw new Error('DATEPART requires 2 arguments.');
       const part = cleanName(rawArgs[0]).toLowerCase();
       const d = parseSqlDate(evaluateExpression(rawArgs[1], row, outerRow, engineState, groupRows));
       if (!d) return null;
@@ -815,6 +880,7 @@ function evaluateBuiltInFunction(
     }
     case 'DATEADD': {
       const rawArgs = splitTopLevel(argsRaw);
+      if (rawArgs.length < 3) throw new Error('DATEADD requires 3 arguments.');
       const part = cleanName(rawArgs[0]).toLowerCase();
       const number = Number(evaluateExpression(rawArgs[1], row, outerRow, engineState, groupRows));
       const d = parseSqlDate(evaluateExpression(rawArgs[2], row, outerRow, engineState, groupRows));
@@ -830,6 +896,7 @@ function evaluateBuiltInFunction(
     }
     case 'DATEDIFF': {
       const rawArgs = splitTopLevel(argsRaw);
+      if (rawArgs.length < 3) throw new Error('DATEDIFF requires 3 arguments.');
       const part = cleanName(rawArgs[0]).toLowerCase();
       const d1 = parseSqlDate(evaluateExpression(rawArgs[1], row, outerRow, engineState, groupRows));
       const d2 = parseSqlDate(evaluateExpression(rawArgs[2], row, outerRow, engineState, groupRows));
@@ -864,7 +931,7 @@ function evaluateBuiltInFunction(
     }
     case 'NULLIF': {
       const args = evaluateArgList();
-      return compareValues(args[0], '=', args[1]) ? null : args[0];
+      return compareValues(args[0], '=', args[1]) === true ? null : args[0];
     }
     case 'IIF': {
       const rawArgs = splitTopLevel(argsRaw);
@@ -883,12 +950,21 @@ function evaluateBuiltInFunction(
    JOIN & SOURCE TABLE RESOLUTION
    ========================================================================== */
 
+interface ParsedTableSource {
+  alias: string;
+  tableName: string;
+  sourceId: string; // Unique table source identifier
+  columns: string[];
+  rows: StoredRow[];
+}
+
 function parseTableSource(
   sourceStr: string,
   database: DatabaseModel,
   engineState: EngineState,
-  outerRow?: StoredRow
-): { alias: string; rows: StoredRow[]; sampleDummyRow: StoredRow } {
+  outerRow?: StoredRow,
+  sourceIndex = 0
+): ParsedTableSource {
   const trimmed = sourceStr.trim();
 
   // Derived subquery table: (SELECT ...) [AS] Alias
@@ -896,7 +972,8 @@ function parseTableSource(
     const endParen = trimmed.lastIndexOf(')');
     const subSql = trimmed.slice(1, endParen).trim();
     const rest = trimmed.slice(endParen + 1).trim().replace(/^AS\s+/i, '');
-    const alias = cleanName(rest || 'SubQuery');
+    const alias = cleanName(rest || `SubQuery${sourceIndex}`);
+    const sourceId = `subquery_${sourceIndex}_${alias}`;
 
     const subRes = executeSelectInternal(subSql, engineState, outerRow);
     if (subRes.error) throw new Error(subRes.error);
@@ -906,34 +983,25 @@ function parseTableSource(
       subRes.columns.forEach((col, idx) => {
         const val = parseValue(row[idx]);
         obj[`${alias}.${col}`] = val;
+        obj[`${sourceId}::${col}`] = val;
         obj[col] = val;
       });
       return obj;
     });
 
-    const sampleDummyRow: StoredRow = {};
-    subRes.columns.forEach((col) => {
-      sampleDummyRow[`${alias}.${col}`] = null;
-      sampleDummyRow[col] = null;
-    });
-
-    return { alias, rows, sampleDummyRow };
+    return { alias, tableName: alias, sourceId, columns: subRes.columns, rows };
   }
 
   // Base Table: TableName [AS] Alias
   const parts = trimmed.split(/\s+(?:AS\s+)?/i);
   const tableName = cleanName(parts[0]);
   const alias = cleanName(parts[1] || parts[0]);
+  const sourceId = `tbl_${sourceIndex}_${alias}`;
 
   const table = tableFor(database, tableName);
   if (!table) throw new Error(`الجدول "${tableName}" غير موجود في قاعدة البيانات.`);
 
-  const sampleDummyRow: StoredRow = {};
-  for (const col of table.columns) {
-    sampleDummyRow[`${tableName}.${col.name}`] = null;
-    sampleDummyRow[`${alias}.${col.name}`] = null;
-    sampleDummyRow[col.name] = null;
-  }
+  const colNames = table.columns.map((c) => c.name);
 
   const rows: StoredRow[] = table.rows.map((r) => {
     const obj: StoredRow = {};
@@ -941,12 +1009,18 @@ function parseTableSource(
       const val = r[col.name] ?? null;
       obj[`${tableName}.${col.name}`] = val;
       obj[`${alias}.${col.name}`] = val;
+      obj[`${sourceId}::${col.name}`] = val;
       obj[col.name] = val;
     }
     return obj;
   });
 
-  return { alias, rows, sampleDummyRow };
+  return { alias, tableName, sourceId, columns: colNames, rows };
+}
+
+interface ProcessedFrom {
+  rows: StoredRow[];
+  sources: ParsedTableSource[];
 }
 
 function processFromAndJoins(
@@ -954,7 +1028,7 @@ function processFromAndJoins(
   database: DatabaseModel,
   engineState: EngineState,
   outerRow?: StoredRow
-): { rows: StoredRow[]; dummyRow: StoredRow } {
+): ProcessedFrom {
   const joinRegex = /\b(INNER|LEFT(?:\s+OUTER)?|RIGHT(?:\s+OUTER)?|FULL(?:\s+OUTER)?|CROSS)\s+JOIN\b|\bJOIN\b/gi;
 
   const joinMatches: { type: string; index: number }[] = [];
@@ -969,14 +1043,14 @@ function processFromAndJoins(
   }
 
   if (joinMatches.length === 0) {
-    const singleSource = parseTableSource(fromClause, database, engineState, outerRow);
-    return { rows: singleSource.rows, dummyRow: singleSource.sampleDummyRow };
+    const singleSource = parseTableSource(fromClause, database, engineState, outerRow, 0);
+    return { rows: singleSource.rows, sources: [singleSource] };
   }
 
   const firstSourceStr = fromClause.slice(0, joinMatches[0].index);
-  const firstParsed = parseTableSource(firstSourceStr, database, engineState, outerRow);
+  const firstParsed = parseTableSource(firstSourceStr, database, engineState, outerRow, 0);
   let currentRows = firstParsed.rows;
-  let accumulatedDummyRow = { ...firstParsed.sampleDummyRow };
+  const sources: ParsedTableSource[] = [firstParsed];
 
   for (let i = 0; i < joinMatches.length; i += 1) {
     const currentJoin = joinMatches[i];
@@ -994,16 +1068,17 @@ function processFromAndJoins(
       rightSourceStr = joinSegment.replace(/^.*?JOIN\s+/i, '');
     }
 
-    const rightSource = parseTableSource(rightSourceStr, database, engineState, outerRow);
-    accumulatedDummyRow = { ...accumulatedDummyRow, ...rightSource.sampleDummyRow };
+    const rightSource = parseTableSource(rightSourceStr, database, engineState, outerRow, i + 1);
+    sources.push(rightSource);
 
     const joinedRows: StoredRow[] = [];
 
     const rightNullRow: StoredRow = {};
-    if (rightSource.rows.length > 0) {
-      Object.keys(rightSource.rows[0]).forEach((k) => {
-        rightNullRow[k] = null;
-      });
+    for (const c of rightSource.columns) {
+      rightNullRow[`${rightSource.tableName}.${c}`] = null;
+      rightNullRow[`${rightSource.alias}.${c}`] = null;
+      rightNullRow[`${rightSource.sourceId}::${c}`] = null;
+      rightNullRow[c] = null;
     }
 
     const matchedRightIndices = new Set<number>();
@@ -1012,7 +1087,8 @@ function processFromAndJoins(
       let matchedAnyRight = false;
 
       rightSource.rows.forEach((rightRow, rIdx) => {
-        const combinedRow = { ...leftRow, ...rightRow };
+        const combinedRow: StoredRow = { ...leftRow, ...rightRow };
+
         const isMatch = onCondition ? Boolean(evaluateExpression(onCondition, combinedRow, outerRow, engineState)) : true;
 
         if (isMatch) {
@@ -1029,10 +1105,13 @@ function processFromAndJoins(
 
     if (currentJoin.type === 'RIGHT' || currentJoin.type === 'FULL') {
       const leftNullRow: StoredRow = {};
-      if (currentRows.length > 0) {
-        Object.keys(currentRows[0]).forEach((k) => {
-          leftNullRow[k] = null;
-        });
+      for (const s of sources.slice(0, -1)) {
+        for (const c of s.columns) {
+          leftNullRow[`${s.tableName}.${c}`] = null;
+          leftNullRow[`${s.alias}.${c}`] = null;
+          leftNullRow[`${s.sourceId}::${c}`] = null;
+          leftNullRow[c] = null;
+        }
       }
 
       rightSource.rows.forEach((rightRow, rIdx) => {
@@ -1045,7 +1124,7 @@ function processFromAndJoins(
     currentRows = joinedRows;
   }
 
-  return { rows: currentRows, dummyRow: accumulatedDummyRow };
+  return { rows: currentRows, sources };
 }
 
 /* ==========================================================================
@@ -1115,30 +1194,27 @@ function executeSelectInternal(sql: string, engineState: EngineState, outerRow?:
 
   // 1. Process FROM and JOINs
   let rows: StoredRow[] = [];
-  let dummyRow: StoredRow = {};
+  let sources: ParsedTableSource[] = [];
 
   if (fromClause) {
     if (!database) return { columns: [], rows: [], error: 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.' };
     try {
       const res = processFromAndJoins(fromClause, database, engineState, outerRow);
       rows = res.rows;
-      dummyRow = res.dummyRow;
+      sources = res.sources;
     } catch (err: unknown) {
       return { columns: [], rows: [], error: err instanceof Error ? err.message : String(err) };
     }
   } else {
-    // Single dummy row when no FROM clause
     rows = [{}];
-    dummyRow = {};
+    sources = [];
   }
 
-  // Sample row for expression validation
-  const sampleValidationRow = rows[0] ?? dummyRow;
+  const sampleValidationRow = rows[0] ?? {};
 
   // 2. WHERE Filtering
   if (whereClause) {
     try {
-      // Validate WHERE expression structure
       evaluateExpression(whereClause, sampleValidationRow, outerRow, engineState);
       rows = rows.filter((r) => Boolean(evaluateExpression(whereClause, r, outerRow, engineState)));
     } catch (err: unknown) {
@@ -1146,30 +1222,52 @@ function executeSelectInternal(sql: string, engineState: EngineState, outerRow?:
     }
   }
 
-  // 3. GROUP BY and Aggregations
-  const projItems = splitTopLevel(projectionPart).map((item) => {
-    const asMatch = item.match(/^([\s\S]+?)\s+AS\s+([[\]\w.-]+)$/i) || item.match(/^([\s\S]+?)\s+([[\]\w.-]+)$/i);
-    let exprStr = item.trim();
-    let alias = item.trim();
+  // 3. Projection Items Parsing & Wildcard (`*`, `s.*`) Expansion
+  const projItems: { expr: string; alias: string }[] = [];
 
-    if (asMatch && !/\b(END|THEN|ELSE)\b/i.test(asMatch[2])) {
-      exprStr = asMatch[1].trim();
-      alias = cleanName(asMatch[2]);
-    } else {
-      const simpleNameMatch = item.match(/^([[\]\w.-]+)$/);
-      if (simpleNameMatch) alias = cleanName(simpleNameMatch[1]);
-    }
-    return { expr: exprStr, alias };
-  });
-
-  // Validate projection expressions against schema/sample row
-  for (const item of projItems) {
-    if (item.expr !== '*') {
-      try {
-        evaluateExpression(item.expr, sampleValidationRow, outerRow, engineState, []);
-      } catch (err: unknown) {
-        return { columns: [], rows: [], error: err instanceof Error ? err.message : String(err) };
+  for (const item of splitTopLevel(projectionPart)) {
+    const trimmed = item.trim();
+    if (trimmed === '*') {
+      if (sources.length > 0) {
+        for (const s of sources) {
+          for (const c of s.columns) {
+            projItems.push({ expr: `${s.alias}.${c}`, alias: c });
+          }
+        }
       }
+    } else {
+      const tableWildcardMatch = trimmed.match(/^([[\]\w.-]+)\.\*$/i);
+      if (tableWildcardMatch) {
+        const sourceAlias = cleanName(tableWildcardMatch[1]);
+        const matchedSource = sources.find((s) => keyOf(s.alias) === keyOf(sourceAlias) || keyOf(s.tableName) === keyOf(sourceAlias));
+        if (!matchedSource) {
+          return { columns: [], rows: [], error: `الجدول أو Alias "${sourceAlias}" غير موجود في الاستعلام.` };
+        }
+        for (const c of matchedSource.columns) {
+          projItems.push({ expr: `${matchedSource.alias}.${c}`, alias: c });
+        }
+      } else {
+        const asMatch = trimmed.match(/^([\s\S]+?)\s+AS\s+([[\]\w.-]+)$/i) || trimmed.match(/^([\s\S]+?)\s+([[\]\w.-]+)$/i);
+        let exprStr = trimmed;
+        let alias = trimmed;
+
+        if (asMatch && !/\b(END|THEN|ELSE)\b/i.test(asMatch[2])) {
+          exprStr = asMatch[1].trim();
+          alias = cleanName(asMatch[2]);
+        } else {
+          const simpleNameMatch = trimmed.match(/^([[\]\w.-]+)$/);
+          if (simpleNameMatch) alias = cleanName(simpleNameMatch[1]);
+        }
+        projItems.push({ expr: exprStr, alias });
+      }
+    }
+  }
+
+  for (const item of projItems) {
+    try {
+      evaluateExpression(item.expr, sampleValidationRow, outerRow, engineState, []);
+    } catch (err: unknown) {
+      return { columns: [], rows: [], error: err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -1211,22 +1309,13 @@ function executeSelectInternal(sql: string, engineState: EngineState, outerRow?:
   }
 
   // 5. Projection
-  const outputColumns: string[] = [];
+  const outputColumns: string[] = projItems.map((p) => p.alias);
   let resultGrid: string[][] = [];
 
   try {
-    if (projectionPart === '*') {
-      if (rows.length > 0) {
-        const headers = Object.keys(rows[0]).filter((k) => !k.includes('.'));
-        outputColumns.push(...(headers.length > 0 ? headers : Object.keys(rows[0])));
-        resultGrid = groupedData.map((g) => outputColumns.map((col) => valueToText(g.sampleRow[col])));
-      }
-    } else {
-      outputColumns.push(...projItems.map((p) => p.alias));
-      resultGrid = groupedData.map((g) =>
-        projItems.map((p) => valueToText(evaluateExpression(p.expr, g.sampleRow, outerRow, engineState, g.groupRows)))
-      );
-    }
+    resultGrid = groupedData.map((g) =>
+      projItems.map((p) => valueToText(evaluateExpression(p.expr, g.sampleRow, outerRow, engineState, g.groupRows)))
+    );
   } catch (err: unknown) {
     return { columns: [], rows: [], error: err instanceof Error ? err.message : String(err) };
   }
@@ -1265,7 +1354,7 @@ function executeSelectInternal(sql: string, engineState: EngineState, outerRow?:
         }
 
         if (valA === valB) continue;
-        const comp = compareValues(valA, '>', valB) ? 1 : -1;
+        const comp = compareValues(valA, '>', valB) === true ? 1 : -1;
         return comp * spec.dir;
       }
       return 0;
@@ -1289,9 +1378,12 @@ function executeQueryWithSetOperators(sql: string, engineState: EngineState): Se
   const matches: { operator: string; index: number }[] = [];
   let m: RegExpExecArray | null;
 
+  let searchPos = 0;
   while ((m = setRegex.exec(sql)) !== null) {
-    if (findKeywordOutside(sql, m[1]) === m.index) {
+    const foundIdx = findKeywordOutside(sql, m[1], searchPos);
+    if (foundIdx === m.index) {
       matches.push({ operator: m[1].toUpperCase().replace(/\s+/, ' '), index: m.index });
+      searchPos = m.index + m[0].length;
     }
   }
 
@@ -1494,8 +1586,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
 
       for (const column of table.columns.filter((item) => item.primaryKey || item.unique)) {
         const valueToCheck = row[column.name];
-        const existsInTable = table.rows.some((existing) => compareValues(existing[column.name], '=', valueToCheck));
-        const existsInPending = pendingRows.some((pending) => compareValues(pending[column.name], '=', valueToCheck));
+        const existsInTable = table.rows.some((existing) => compareValues(existing[column.name], '=', valueToCheck) === true);
+        const existsInPending = pendingRows.some((pending) => compareValues(pending[column.name], '=', valueToCheck) === true);
         if (existsInTable || existsInPending) {
           return errorResult(state, start, `قيمة مكررة في العمود الفريد/المفتاح الرئيسي "${column.name}".`);
         }
