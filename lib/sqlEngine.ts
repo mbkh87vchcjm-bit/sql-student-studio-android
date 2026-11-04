@@ -1950,13 +1950,28 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (!view) return errorResult(state, start, `العرض "${viewName}" غير موجود.`);
     const definition = match[2].trim();
     if (!/^SELECT\b/i.test(definition)) return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
-    const validation = executeQueryWithSetOperators(definition, state);
-    if (validation.error) return errorResult(state, start, `تعريف VIEW غير صالح: ${validation.error}`);
-    const duplicateColumns = validation.columns.filter((column, index) =>
-      validation.columns.findIndex((candidate) => keyOf(candidate) === keyOf(column)) !== index
-    );
-    if (duplicateColumns.length) return errorResult(state, start, `أسماء أعمدة العرض يجب أن تكون فريدة؛ الاسم المكرر: "${duplicateColumns[0]}".`);
+
+    // Validate the candidate definition while it is active so circular view dependencies are detected.
+    const previousDefinition = view.definition;
     view.definition = definition;
+    let validation: SelectInternalResult | null = null;
+    try {
+      validation = executeQueryWithSetOperators(definition, state);
+    } catch (error) {
+      view.definition = previousDefinition;
+      return errorResult(state, start, error instanceof Error ? error.message : String(error));
+    }
+    if (!validation || validation.error) {
+      view.definition = previousDefinition;
+      return errorResult(state, start, `تعريف VIEW غير صالح: ${validation?.error ?? 'تعذر التحقق من التعريف.'}`);
+    }
+    const duplicateColumns = validation.columns.filter((column, index) =>
+      validation!.columns.findIndex((candidate) => keyOf(candidate) === keyOf(column)) !== index
+    );
+    if (duplicateColumns.length) {
+      view.definition = previousDefinition;
+      return errorResult(state, start, `أسماء أعمدة العرض يجب أن تكون فريدة؛ الاسم المكرر: "${duplicateColumns[0]}".`);
+    }
     return success(state, start, { messages: [`تم تعديل تعريف العرض "${viewName}".`] });
   }
 

@@ -887,3 +887,20 @@ test('VIEW names cannot collide with tables and invalid ALTER VIEW is atomic', (
   assert.deepStrictEqual(stillWorks.result.errors, []);
   assert.deepStrictEqual(stillWorks.result.rows, [['1', 'Opening'], ['2', 'Deposit']]);
 });
+
+
+test('ALTER VIEW rejects circular view dependencies and preserves the previous definition', () => {
+  const state = createAdminState();
+  const first = executeScript(state, 'CREATE VIEW ViewOne AS SELECT Id, Name FROM Ledger;');
+  assert.deepStrictEqual(first.result.errors, []);
+  const second = executeScript(first.state, 'CREATE VIEW ViewTwo AS SELECT Id, Name FROM ViewOne;');
+  assert.deepStrictEqual(second.result.errors, []);
+
+  const circular = executeScript(second.state, 'ALTER VIEW ViewOne AS SELECT Id, Name FROM ViewTwo;');
+  assert.ok(circular.result.errors.length > 0);
+  assert.match(circular.result.errors[0], /اعتماد دائري/);
+
+  const stillValid = executeScript(circular.state, 'SELECT Id, Name FROM ViewOne ORDER BY Id;');
+  assert.deepStrictEqual(stillValid.result.errors, []);
+  assert.deepStrictEqual(stillValid.result.rows, [['1', 'Opening'], ['2', 'Deposit']]);
+});
