@@ -1423,14 +1423,6 @@ function systemCatalogData(sourceName: string, database: DatabaseModel): Virtual
           unique_index_id: indexId++,
         });
       }
-      (table.uniqueConstraints ?? []).forEach((constraint, index) => rows.push({
-        name: 'UQ_' + table.name + '_' + (index + 1),
-        object_id: idFor(table.name),
-        parent_object_id: idFor(table.name),
-        type: 'UQ',
-        type_desc: 'UNIQUE_CONSTRAINT',
-        unique_index_id: indexId++,
-      }));
       for (const column of table.columns.filter((item) => item.unique)) rows.push({
         name: 'UQ_' + table.name + '_' + column.name,
         object_id: idFor(table.name),
@@ -1439,6 +1431,14 @@ function systemCatalogData(sourceName: string, database: DatabaseModel): Virtual
         type_desc: 'UNIQUE_CONSTRAINT',
         unique_index_id: indexId++,
       });
+      (table.uniqueConstraints ?? []).forEach((constraint, index) => rows.push({
+        name: 'UQ_' + table.name + '_' + (index + 1),
+        object_id: idFor(table.name),
+        parent_object_id: idFor(table.name),
+        type: 'UQ',
+        type_desc: 'UNIQUE_CONSTRAINT',
+        unique_index_id: indexId++,
+      }));
     }
     return { columns, rows };
   }
