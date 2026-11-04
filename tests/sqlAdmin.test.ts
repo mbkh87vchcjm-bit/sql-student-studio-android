@@ -70,7 +70,7 @@ test('ALTER TABLE DROP COLUMN removes values but protects key columns', () => {
 
   const rejected = executeScript(dropped.state, 'ALTER TABLE Ledger DROP COLUMN Id;');
   assert.ok(rejected.result.errors.length > 0);
-  assert.match(rejected.result.errors[0], /PRIMARY KEY أو UNIQUE/);
+  assert.match(rejected.result.errors[0], /لا يمكن حذف العمود/);
 });
 
 test('TRUNCATE TABLE removes all rows while keeping the table schema', () => {
@@ -174,7 +174,7 @@ CREATE TABLE Inventory (
 
   const dropped = executeScript(created.state, 'ALTER TABLE Inventory DROP COLUMN Quantity;');
   assert.ok(dropped.result.errors.length > 0);
-  assert.match(dropped.result.errors[0], /PRIMARY KEY أو UNIQUE/);
+  assert.match(dropped.result.errors[0], /لا يمكن حذف العمود/);
 });
  
 test('FOREIGN KEY enforces parent references during INSERT and UPDATE', () => {
@@ -545,7 +545,7 @@ CREATE TABLE Accounts (
 
   const dropped = executeScript(created.state, 'ALTER TABLE Accounts DROP COLUMN Balance;');
   assert.ok(dropped.result.errors.length > 0);
-  assert.match(dropped.result.errors[0], /PRIMARY KEY أو UNIQUE/);
+  assert.match(dropped.result.errors[0], /لا يمكن حذف العمود/);
   assert.ok(dropped.state.databases.checkcolumndb.tables.accounts.columns.some((column) => column.name === 'Balance'));
 });
 
@@ -606,7 +606,7 @@ CREATE TABLE Users (Id INT PRIMARY KEY, Active BIT NULL);`
 
   const blockedDrop = executeScript(inserted.state, 'ALTER TABLE Users DROP COLUMN Active;');
   assert.ok(blockedDrop.result.errors.length > 0);
-  assert.match(blockedDrop.result.errors[0], /DEFAULT/);
+  assert.match(blockedDrop.result.errors[0], /لا يمكن حذف العمود/);
 
   const removed = executeScript(
     inserted.state,
