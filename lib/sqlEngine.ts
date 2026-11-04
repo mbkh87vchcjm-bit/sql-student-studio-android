@@ -2306,6 +2306,9 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (columnIndex < 0) return errorResult(state, start, 'العمود "' + columnName + '" غير موجود في الجدول.');
     const oldColumn = table.columns[columnIndex];
     const nullability = match[4]?.toUpperCase();
+    if (oldColumn.identity && match[3].toUpperCase().replace(/\s+/g, '') !== oldColumn.type) {
+      return errorResult(state, start, 'لا يمكن تغيير نوع عمود IDENTITY باستخدام ALTER COLUMN في هذا الإصدار التعليمي.');
+    }
     if (oldColumn.primaryKey && nullability === 'NULL') {
       return errorResult(state, start, 'لا يمكن جعل عمود المفتاح الرئيسي يقبل NULL.');
     }
@@ -2390,6 +2393,9 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     }
     const removedRows = table.rows.length;
     table.rows = [];
+    for (const column of table.columns) {
+      if (column.identity) column.identity.nextValue = column.identity.seed;
+    }
     return success(state, start, { affectedRows: removedRows, messages: ['تم تفريغ الجدول "' + tableName + '" بنجاح. (' + removedRows + ' صفوف محذوفة)'] });
   }
 
@@ -2409,6 +2415,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (!tuples.length) return errorResult(state, start, 'لم يتم العثور على VALUES صالحة.');
 
     const pendingRows: StoredRow[] = [];
+    const identityNextValues = new Map<ColumnModel, number>();
+    const identityInsertEnabled = state.identityInsertTable === keyOf(database.name + '.' + table.name);
 
     for (const tuple of tuples) {
       const values = splitTopLevel(tuple).map((v) => evaluateExpression(v, {}, undefined, state));
@@ -2417,9 +2425,35 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       const row: StoredRow = {};
       for (const column of table.columns) {
         const index = targetColumns.findIndex((target) => keyOf(target) === keyOf(column.name));
-        const inputValue = index >= 0 ? values[index] : column.defaultValue ?? null;
         try {
-          row[column.name] = coerceColumnValue(inputValue, column);
+          if (column.identity) {
+            const currentNext = identityNextValues.get(column) ?? column.identity.nextValue;
+            if (index >= 0) {
+              if (!identityInsertEnabled) {
+                return errorResult(state, start, 'لا يمكن إدخال قيمة صريحة في عمود IDENTITY "' + column.name + '"؛ نفّذ SET IDENTITY_INSERT ' + tableName + ' ON أولًا.');
+              }
+              const explicitValue = coerceColumnValue(values[index], column);
+              if (explicitValue === null) {
+                return errorResult(state, start, 'لا يمكن إدخال NULL في عمود IDENTITY "' + column.name + '".');
+              }
+              const numericValue = Number(explicitValue);
+              const shouldAdvance = column.identity.increment > 0
+                ? numericValue >= currentNext
+                : numericValue <= currentNext;
+              identityNextValues.set(
+                column,
+                shouldAdvance ? numericValue + column.identity.increment : currentNext
+              );
+              row[column.name] = explicitValue;
+            } else {
+              const generatedValue = coerceColumnValue(currentNext, column);
+              row[column.name] = generatedValue;
+              identityNextValues.set(column, currentNext + column.identity.increment);
+            }
+          } else {
+            const inputValue = index >= 0 ? values[index] : column.defaultValue ?? null;
+            row[column.name] = coerceColumnValue(inputValue, column);
+          }
         } catch (error) {
           return errorResult(state, start, error instanceof Error ? error.message : String(error));
         }
@@ -2436,6 +2470,9 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const checkError = validateCheckConstraints(table, candidateRows, state);
     if (checkError) return errorResult(state, start, checkError);
     table.rows.push(...pendingRows);
+    for (const [column, nextValue] of identityNextValues) {
+      if (column.identity) column.identity.nextValue = nextValue;
+    }
     const inserted = pendingRows.length;
     return success(state, start, { affectedRows: inserted, messages: [`(${inserted} rows affected)`] });
   }
@@ -2479,6 +2516,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
             const rawValue = evaluateExpression(assignment[2], row, undefined, state);
             const column = table.columns.find((item) => keyOf(item.name) === keyOf(col));
             if (!column) throw new Error('العمود "' + col + '" غير موجود في الجدول.');
+            if (column.identity) throw new Error('لا يمكن تعديل قيمة عمود IDENTITY "' + column.name + '" مباشرة باستخدام UPDATE.');
             copy[col] = coerceColumnValue(rawValue, column);
           }
           return { modified: true, row: copy, original: row };
