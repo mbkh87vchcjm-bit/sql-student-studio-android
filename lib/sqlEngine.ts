@@ -7,6 +7,8 @@ export interface ColumnModel {
   primaryKey: boolean;
   unique: boolean;
   defaultValue?: SqlValue;
+  /** Optional name for a SQL Server DEFAULT constraint. */
+  defaultConstraintName?: string;
 }
 
 export type StoredRow = Record<string, SqlValue>;
@@ -1912,6 +1914,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       if (!columnMatch) return errorResult(state, start, `تعريف العمود غير مفهوم: ${definition}`);
       const rest = columnMatch[3] ?? '';
       const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|\s+CHECK\b|$)/i);
+      const namedDefaultMatch = rest.match(/\bCONSTRAINT\s+([\[\]\w-]+)\s+DEFAULT\b/i);
       const inlineCheck = rest.match(/\bCHECK\s*\(([\s\S]*)\)\s*$/i);
       if (inlineCheck) {
         tableCheckConstraints.push({
@@ -1935,6 +1938,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
         primaryKey: /\bPRIMARY\s+KEY\b/i.test(rest),
         unique: /\bUNIQUE\b/i.test(rest),
         defaultValue: defaultMatch ? parseValue(defaultMatch[1].trim()) : undefined,
+        ...(namedDefaultMatch ? { defaultConstraintName: cleanName(namedDefaultMatch[1]) } : {}),
       });
     }
     const duplicateColumn = columns.find((column, index) => columns.some((other, otherIndex) => otherIndex !== index && keyOf(other.name) === keyOf(column.name)));
@@ -1972,10 +1976,17 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       ...(tableCheckConstraints.length ? { checkConstraints: tableCheckConstraints } : {}),
     };
     const constraintNames = new Set<string>();
-    for (const constraint of [...tableCheckConstraints, ...tableForeignKeys]) {
-      const normalizedName = keyOf(constraint.name);
+    const namedDefaults = columns
+      .filter((column) => column.defaultConstraintName)
+      .map((column) => column.defaultConstraintName as string);
+    for (const constraintName of [
+      ...tableCheckConstraints.map((constraint) => constraint.name),
+      ...tableForeignKeys.map((foreignKey) => foreignKey.name),
+      ...namedDefaults,
+    ]) {
+      const normalizedName = keyOf(constraintName);
       if (constraintNames.has(normalizedName)) {
-        return errorResult(state, start, 'اسم القيد "' + constraint.name + '" مكرر في الجدول.');
+        return errorResult(state, start, 'اسم القيد "' + constraintName + '" مكرر في الجدول.');
       }
       constraintNames.add(normalizedName);
     }
@@ -2041,7 +2052,29 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: ['تمت إضافة قيد FOREIGN KEY "' + foreignKey.name + '".'] });
   }
 
-  // ALTER TABLE ADD CHECK CONSTRAINT
+// ALTER TABLE ADD DEFAULT CONSTRAINT
+  match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+ADD\s+CONSTRAINT\s+([\[\]\w-]+)\s+DEFAULT\s+(.+?)\s+FOR\s+([\[\]\w-]+)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const constraintName = cleanName(match[2]);
+    const columnName = cleanName(match[4]);
+    const column = table.columns.find((item) => keyOf(item.name) === keyOf(columnName));
+    if (!column) return errorResult(state, start, 'العمود "' + columnName + '" غير موجود في الجدول "' + tableName + '".');
+    const duplicateConstraint = table.columns.some((item) => keyOf(item.defaultConstraintName ?? '') === keyOf(constraintName))
+      || (table.foreignKeys ?? []).some((item) => keyOf(item.name) === keyOf(constraintName))
+      || (table.checkConstraints ?? []).some((item) => keyOf(item.name) === keyOf(constraintName));
+    if (duplicateConstraint) return errorResult(state, start, 'اسم القيد "' + constraintName + '" مستخدم بالفعل في الجدول.');
+    if (column.defaultValue !== undefined || column.defaultConstraintName) {
+      return errorResult(state, start, 'العمود "' + columnName + '" لديه قيمة DEFAULT بالفعل.');
+    }
+    column.defaultValue = parseValue(match[3].trim());
+    column.defaultConstraintName = constraintName;
+    return success(state, start, { messages: ['تمت إضافة قيد DEFAULT "' + constraintName + '" للعمود "' + columnName + '".'] });
+  }
+
+    // ALTER TABLE ADD CHECK CONSTRAINT
   match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+ADD\s+(?:CONSTRAINT\s+([\[\]\w-]+)\s+)?CHECK\s*\(([\s\S]*)\)$/i);
   if (match) {
     const tableName = cleanName(match[1]);
@@ -2086,7 +2119,13 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       if (table.checkConstraints.length === 0) delete table.checkConstraints;
       return success(state, start, { messages: ['تم حذف قيد CHECK "' + constraintName + '" من الجدول "' + tableName + '".'] });
     }
-    return errorResult(state, start, 'القيد "' + constraintName + '" غير موجود في الجدول "' + tableName + '". يدعم DROP CONSTRAINT حاليًا قيود FOREIGN KEY وCHECK.');
+    const defaultColumn = table.columns.find((column) => keyOf(column.defaultConstraintName ?? '') === keyOf(constraintName));
+    if (defaultColumn) {
+      delete defaultColumn.defaultValue;
+      delete defaultColumn.defaultConstraintName;
+      return success(state, start, { messages: ['تم حذف قيد DEFAULT "' + constraintName + '" من العمود "' + defaultColumn.name + '".'] });
+    }
+    return errorResult(state, start, 'القيد "' + constraintName + '" غير موجود في الجدول "' + tableName + '". يدعم DROP CONSTRAINT حاليًا قيود FOREIGN KEY وCHECK وDEFAULT.');
   }
 
   // 6. ALTER TABLE ADD COLUMN
@@ -2100,7 +2139,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       return errorResult(state, start, 'العمود "' + columnName + '" موجود بالفعل في الجدول.');
     }
     const rest = match[4] ?? '';
-    const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|$)/i);
+    const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|\s+CHECK\b|$)/i);
+    const namedDefaultMatch = rest.match(/\bCONSTRAINT\s+([\[\]\w-]+)\s+DEFAULT\b/i);
     const newColumn: ColumnModel = {
       name: columnName,
       type: match[3].toUpperCase().replace(/\s+/g, ''),
@@ -2108,6 +2148,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       primaryKey: /\bPRIMARY\s+KEY\b/i.test(rest),
       unique: /\bUNIQUE\b/i.test(rest),
       defaultValue: defaultMatch ? parseValue(defaultMatch[1].trim()) : undefined,
+      ...(namedDefaultMatch ? { defaultConstraintName: cleanName(namedDefaultMatch[1]) } : {}),
     };
     if (newColumn.primaryKey) newColumn.nullable = false;
     let candidateRows: StoredRow[];
@@ -2195,8 +2236,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const belongsToCheck = (table.checkConstraints ?? []).some((constraint) =>
       checkExpressionReferencesColumn(constraint.expression, columnName)
     );
-    if (column.primaryKey || column.unique || belongsToUniqueConstraint || belongsToForeignKey || belongsToCheck) {
-      return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه يحمل قيد PRIMARY KEY أو UNIQUE. احذف القيد أولًا.');
+    if (column.primaryKey || column.unique || column.defaultConstraintName || belongsToUniqueConstraint || belongsToForeignKey || belongsToCheck) {
+      return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه مرتبط بقيد PRIMARY KEY أو UNIQUE أو FOREIGN KEY أو CHECK أو DEFAULT. احذف القيد أولًا.');
     }
     table.columns.splice(columnIndex, 1);
     table.rows = table.rows.map((row) => {
