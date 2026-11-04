@@ -549,6 +549,74 @@ CREATE TABLE Accounts (
   assert.ok(dropped.state.databases.checkcolumndb.tables.accounts.columns.some((column) => column.name === 'Balance'));
 });
 
+test('Named DEFAULT constraints apply values and can be removed', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE DefaultConstraintDB;
+USE DefaultConstraintDB;
+CREATE TABLE Tasks (
+  Id INT PRIMARY KEY,
+  Status NVARCHAR(20) CONSTRAINT DF_Tasks_Status DEFAULT 'Pending'
+);
+INSERT INTO Tasks (Id) VALUES (1);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.databases.defaultconstraintdb.tables.tasks.rows[0].Status, 'Pending');
+
+  const removed = executeScript(
+    created.state,
+    'ALTER TABLE Tasks DROP CONSTRAINT DF_Tasks_Status;'
+  );
+  assert.deepStrictEqual(removed.result.errors, []);
+  assert.strictEqual(removed.state.databases.defaultconstraintdb.tables.tasks.columns.find((column) => column.name === 'Status')?.defaultValue, undefined);
+
+  const inserted = executeScript(
+    removed.state,
+    'INSERT INTO Tasks (Id) VALUES (2);'
+  );
+  assert.deepStrictEqual(inserted.result.errors, []);
+  assert.strictEqual(inserted.state.databases.defaultconstraintdb.tables.tasks.rows[1].Status, null);
+});
+
+test('ALTER TABLE ADD DEFAULT validates the type and protects its column until dropped', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE AlterDefaultDB;
+USE AlterDefaultDB;
+CREATE TABLE Users (Id INT PRIMARY KEY, Active BIT NULL);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const invalidDefault = executeScript(
+    created.state,
+    "ALTER TABLE Users ADD CONSTRAINT DF_Users_Active DEFAULT 2 FOR Active;"
+  );
+  assert.ok(invalidDefault.result.errors.length > 0);
+  assert.match(invalidDefault.result.errors[0], /BIT يقبل القيمتين/);
+  assert.strictEqual(invalidDefault.state.databases.alterdefaultdb.tables.users.columns.find((column) => column.name === 'Active')?.defaultConstraintName, undefined);
+
+  const added = executeScript(
+    created.state,
+    'ALTER TABLE Users ADD CONSTRAINT DF_Users_Active DEFAULT 1 FOR Active;'
+  );
+  assert.deepStrictEqual(added.result.errors, []);
+  const inserted = executeScript(added.state, 'INSERT INTO Users (Id) VALUES (1);');
+  assert.deepStrictEqual(inserted.result.errors, []);
+  assert.strictEqual(inserted.state.databases.alterdefaultdb.tables.users.rows[0].Active, 1);
+
+  const blockedDrop = executeScript(inserted.state, 'ALTER TABLE Users DROP COLUMN Active;');
+  assert.ok(blockedDrop.result.errors.length > 0);
+  assert.match(blockedDrop.result.errors[0], /DEFAULT/);
+
+  const removed = executeScript(
+    inserted.state,
+    'ALTER TABLE Users DROP CONSTRAINT DF_Users_Active;'
+  );
+  assert.deepStrictEqual(removed.result.errors, []);
+  const allowedDrop = executeScript(removed.state, 'ALTER TABLE Users DROP COLUMN Active;');
+  assert.deepStrictEqual(allowedDrop.result.errors, []);
+});
+ 
 test('BEGIN TRANSACTION and ROLLBACK restore the original data', () => {
   const state = createAdminState();
   const result = executeScript(
