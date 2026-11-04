@@ -632,3 +632,29 @@ test('NOT LIKE Clause and Function Argument Validation', () => {
   assert.ok(res.result.errors.length > 0);
   assert.match(res.result.errors[0], /SUBSTRING/i);
 });
+
+test('BETWEEN delimiter AND is not mistaken for a logical AND operator', () => {
+  const state = setupSampleDatabase();
+
+  const onlyBetween = executeScript(
+    state,
+    'SELECT Name FROM Students WHERE Age BETWEEN 20 AND 21 ORDER BY Name;'
+  );
+  assert.deepStrictEqual(onlyBetween.result.errors, []);
+  assert.deepStrictEqual(onlyBetween.result.rows, [
+    ['Ahmed Khaled'],
+    ['Ali Hassan'],
+    ['Omar Farouk'],
+  ]);
+
+  const betweenWithLogicalAnd = executeScript(
+    state,
+    'SELECT Name FROM Students WHERE Age BETWEEN 18 AND 22 AND Grade >= 80 ORDER BY Name;'
+  );
+  assert.deepStrictEqual(betweenWithLogicalAnd.result.errors, []);
+  assert.deepStrictEqual(betweenWithLogicalAnd.result.rows, [
+    ['Ahmed Khaled'],
+    ['Ali Hassan'],
+    ['Mona Ali'],
+  ]);
+});
