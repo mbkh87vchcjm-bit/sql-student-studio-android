@@ -2202,7 +2202,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   }
 
   // DBCC CHECKIDENT: inspect or reseed the simulated IDENTITY counter.
-  match = sql.match(/^DBCC\\s+CHECKIDENT\\s*\\(([\\s\\S]*)\\)$/i);
+  match = sql.match(/^DBCC\s+CHECKIDENT\s*\(([\s\S]*)\)$/i);
   if (match) {
     const args = splitTopLevel(match[1]);
     if (args.length < 1 || args.length > 3) {
@@ -2239,7 +2239,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       });
     }
 
-    if (args.length !== 3 || !/^-?\\d+$/.test(args[2].trim())) {
+    if (args.length !== 3 || !/^-?\d+$/.test(args[2].trim())) {
       return errorResult(state, start, 'استخدم RESEED مع قيمة صحيحة صريحة، مثل DBCC CHECKIDENT (\'' + tableName + '\', RESEED, 100).');
     }
     const reseedValue = Number(args[2].trim());
