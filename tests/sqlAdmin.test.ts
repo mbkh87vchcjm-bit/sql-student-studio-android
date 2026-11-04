@@ -86,7 +86,7 @@ test('TRUNCATE TABLE removes all rows while keeping the table schema', () => {
 test('INSERT and UPDATE enforce column data types and lengths', () => {
   const state = createAdminState();
 
-  const badInsert = executeScript(state, "INSERT INTO Ledger (Id, Name, Balance) VALUES (3, 'TooLongNameForColumn', 10);");
+  const badInsert = executeScript(state, "INSERT INTO Ledger (Id, Name, Balance) VALUES (3, 'NameThatIsDefinitelyTooLongForTheColumn', 10);");
   assert.ok(badInsert.result.errors.length > 0);
   assert.match(badInsert.result.errors[0], /الحد الأقصى للطول/);
   assert.strictEqual(badInsert.state.databases.admindb.tables.ledger.rows.length, 2);
