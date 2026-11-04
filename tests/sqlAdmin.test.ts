@@ -1076,3 +1076,53 @@ test('CREATE VIEW validates columns on an empty base table and remains queryable
   assert.deepStrictEqual(selected.result.rows, []);
   assert.deepStrictEqual(selected.result.columns, ['FullName']);
 });
+
+
+/* Additional sys catalog metadata for indexes, constraints and identity columns */
+
+test('sys.indexes lists primary keys and user-created unique/non-unique indexes', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SysIndexDB; USE SysIndexDB; CREATE TABLE Products (Id INT PRIMARY KEY, Code NVARCHAR(20) NOT NULL, CategoryId INT); CREATE UNIQUE INDEX UX_Products_Code ON Products (Code); CREATE INDEX IX_Products_Category ON Products (CategoryId);');
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT name, type_desc, is_unique, is_primary_key FROM sys.indexes ORDER BY index_id;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['PK_Products', 'CLUSTERED', '1', '1'],
+    ['UX_Products_Code', 'NONCLUSTERED', '1', '0'],
+    ['IX_Products_Category', 'NONCLUSTERED', '0', '0'],
+  ]);
+});
+
+test('sys.foreign_keys exposes parent and referenced table object IDs', () => {
+  const created = executeScript(EMPTY_STATE, "CREATE DATABASE SysForeignDB; USE SysForeignDB; CREATE TABLE Departments (Id INT PRIMARY KEY); CREATE TABLE Students (Id INT PRIMARY KEY, DepartmentId INT, CONSTRAINT FK_Students_Departments FOREIGN KEY (DepartmentId) REFERENCES Departments(Id));");
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT name, parent_object_id, referenced_object_id, delete_referential_action_desc FROM sys.foreign_keys;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.strictEqual(result.result.rows.length, 1);
+  assert.strictEqual(result.result.rows[0][0], 'FK_Students_Departments');
+  assert.notStrictEqual(result.result.rows[0][1], result.result.rows[0][2]);
+  assert.strictEqual(result.result.rows[0][3], 'NO_ACTION');
+});
+
+test('sys.check_constraints exposes check expressions', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SysCheckDB; USE SysCheckDB; CREATE TABLE Products (Id INT PRIMARY KEY, Price DECIMAL(10,2) CHECK (Price >= 0));');
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT name, definition, is_disabled, is_not_trusted FROM sys.check_constraints;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [['CK_Products_Price', 'Price >= 0', '0', '0']]);
+});
+
+test('sys.identity_columns reports seed, increment and last stored identity value', () => {
+  const created = executeScript(EMPTY_STATE, "CREATE DATABASE SysIdentityDB; USE SysIdentityDB; CREATE TABLE Jobs (Id INT IDENTITY(10,5) PRIMARY KEY, Title NVARCHAR(20)); INSERT INTO Jobs (Title) VALUES ('A'), ('B');");
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT name, seed_value, increment_value, last_value FROM sys.identity_columns;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [['Id', '10', '5', '15']]);
+});
+
+test('sys.default_constraints exposes default expressions and their column IDs', () => {
+  const created = executeScript(EMPTY_STATE, "CREATE DATABASE SysDefaultDB; USE SysDefaultDB; CREATE TABLE Tasks (Id INT PRIMARY KEY, Status NVARCHAR(12) CONSTRAINT DF_Tasks_Status DEFAULT 'Open');");
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT name, parent_column_id, definition FROM sys.default_constraints;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [['DF_Tasks_Status', '2', "'Open'"]]);
+});

@@ -1345,6 +1345,99 @@ function systemCatalogData(sourceName: string, database: DatabaseModel): Virtual
     return { columns, rows };
   }
 
+  if (source === 'sys.indexes') {
+    const columns = ['object_id', 'index_id', 'name', 'type', 'type_desc', 'is_unique', 'is_primary_key'];
+    const rows: StoredRow[] = [];
+    for (const table of tables) {
+      let indexId = 1;
+      const primaryKeys = table.primaryKeyColumns?.length
+        ? table.primaryKeyColumns
+        : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      if (primaryKeys.length) rows.push({
+        object_id: idFor(table.name), index_id: indexId++, name: 'PK_' + table.name,
+        type: 1, type_desc: 'CLUSTERED', is_unique: 1, is_primary_key: 1,
+      });
+      (table.uniqueConstraints ?? []).forEach((constraint, index) => rows.push({
+        object_id: idFor(table.name), index_id: indexId++, name: 'UQ_' + table.name + '_' + (index + 1),
+        type: 2, type_desc: 'NONCLUSTERED', is_unique: 1, is_primary_key: 0,
+      }));
+      for (const column of table.columns.filter((item) => item.unique)) rows.push({
+        object_id: idFor(table.name), index_id: indexId++, name: 'UQ_' + table.name + '_' + column.name,
+        type: 2, type_desc: 'NONCLUSTERED', is_unique: 1, is_primary_key: 0,
+      });
+      for (const index of table.indexes ?? []) rows.push({
+        object_id: idFor(table.name), index_id: indexId++, name: index.name,
+        type: 2, type_desc: 'NONCLUSTERED', is_unique: index.unique ? 1 : 0, is_primary_key: 0,
+      });
+    }
+    return { columns, rows };
+  }
+
+  if (source === 'sys.foreign_keys') {
+    const columns = ['name', 'parent_object_id', 'referenced_object_id', 'is_disabled', 'is_not_trusted', 'delete_referential_action_desc', 'update_referential_action_desc'];
+    const rows: StoredRow[] = [];
+    for (const table of tables) for (const foreignKey of table.foreignKeys ?? []) rows.push({
+      name: foreignKey.name,
+      parent_object_id: idFor(table.name),
+      referenced_object_id: idFor(foreignKey.referencedTable),
+      is_disabled: 0,
+      is_not_trusted: 0,
+      delete_referential_action_desc: 'NO_ACTION',
+      update_referential_action_desc: 'NO_ACTION',
+    });
+    return { columns, rows };
+  }
+
+  if (source === 'sys.check_constraints') {
+    const columns = ['name', 'parent_object_id', 'definition', 'is_disabled', 'is_not_trusted'];
+    const rows: StoredRow[] = [];
+    for (const table of tables) for (const constraint of table.checkConstraints ?? []) rows.push({
+      name: constraint.name,
+      parent_object_id: idFor(table.name),
+      definition: constraint.expression,
+      is_disabled: 0,
+      is_not_trusted: 0,
+    });
+    return { columns, rows };
+  }
+
+  if (source === 'sys.identity_columns') {
+    const columns = ['object_id', 'column_id', 'name', 'seed_value', 'increment_value', 'last_value', 'is_not_for_replication'];
+    const rows: StoredRow[] = [];
+    for (const table of tables) table.columns.forEach((column, index) => {
+      if (!column.identity) return;
+      const values = table.rows.map((row) => row[column.name]).filter((value): value is number => typeof value === 'number');
+      const lastValue = values.length
+        ? (column.identity.increment > 0 ? Math.max(...values) : Math.min(...values))
+        : null;
+      rows.push({
+        object_id: idFor(table.name), column_id: index + 1, name: column.name,
+        seed_value: column.identity.seed, increment_value: column.identity.increment,
+        last_value: lastValue, is_not_for_replication: 0,
+      });
+    });
+    return { columns, rows };
+  }
+
+  if (source === 'sys.default_constraints') {
+    const columns = ['name', 'parent_object_id', 'parent_column_id', 'definition'];
+    const rows: StoredRow[] = [];
+    for (const table of tables) table.columns.forEach((column, index) => {
+      if (column.defaultValue === undefined) return;
+      const value = column.defaultValue;
+      const definition = value === null ? 'NULL'
+        : typeof value === 'string' ? "'" + value.replace(/'/g, "''") + "'"
+        : String(value);
+      rows.push({
+        name: column.defaultConstraintName ?? ('DF_' + table.name + '_' + column.name),
+        parent_object_id: idFor(table.name),
+        parent_column_id: index + 1,
+        definition,
+      });
+    });
+    return { columns, rows };
+  }
+
   return null;
 }
 
