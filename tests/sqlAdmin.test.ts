@@ -617,6 +617,129 @@ CREATE TABLE Users (Id INT PRIMARY KEY, Active BIT NULL);`
   assert.deepStrictEqual(allowedDrop.result.errors, []);
 });
  
+test('CREATE INDEX and DROP INDEX maintain index metadata and protect indexed columns', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE IndexDB;
+USE IndexDB;
+CREATE TABLE Products (
+  Id INT PRIMARY KEY,
+  CategoryId INT NOT NULL,
+  Code NVARCHAR(20) NOT NULL,
+  Price DECIMAL(10,2)
+);
+INSERT INTO Products (Id, CategoryId, Code, Price) VALUES
+  (1, 10, 'A-1', 25.5),
+  (2, 10, 'A-2', 30.0);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const regular = executeScript(
+    created.state,
+    'CREATE INDEX IX_Products_Category ON Products (CategoryId);'
+  );
+  assert.deepStrictEqual(regular.result.errors, []);
+  assert.deepStrictEqual(regular.state.databases.indexdb.tables.products.indexes?.[0], {
+    name: 'IX_Products_Category',
+    columns: ['CategoryId'],
+    unique: false,
+  });
+
+  const unique = executeScript(
+    regular.state,
+    'CREATE UNIQUE INDEX UX_Products_Code ON Products (Code);'
+  );
+  assert.deepStrictEqual(unique.result.errors, []);
+  assert.strictEqual(unique.state.databases.indexdb.tables.products.indexes?.length, 2);
+
+  const duplicate = executeScript(
+    unique.state,
+    "INSERT INTO Products (Id, CategoryId, Code, Price) VALUES (3, 11, 'A-1', 40);"
+  );
+  assert.ok(duplicate.result.errors.length > 0);
+  assert.match(duplicate.result.errors[0], /UNIQUE أو PRIMARY KEY/);
+  assert.strictEqual(duplicate.state.databases.indexdb.tables.products.rows.length, 2);
+
+  const blockedDrop = executeScript(
+    unique.state,
+    'ALTER TABLE Products DROP COLUMN Code;'
+  );
+  assert.ok(blockedDrop.result.errors.length > 0);
+  assert.match(blockedDrop.result.errors[0], /فهرس/);
+
+  const removed = executeScript(
+    unique.state,
+    'DROP INDEX UX_Products_Code ON Products;'
+  );
+  assert.deepStrictEqual(removed.result.errors, []);
+  assert.strictEqual(removed.state.databases.indexdb.tables.products.indexes?.length, 1);
+
+  const nowAllowed = executeScript(
+    removed.state,
+    "INSERT INTO Products (Id, CategoryId, Code, Price) VALUES (3, 11, 'A-1', 40);"
+  );
+  assert.deepStrictEqual(nowAllowed.result.errors, []);
+  assert.strictEqual(nowAllowed.state.databases.indexdb.tables.products.rows.length, 3);
+});
+
+test('UNIQUE INDEX rejects existing duplicates and invalid index definitions', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE InvalidIndexDB;
+USE InvalidIndexDB;
+CREATE TABLE Users (Id INT PRIMARY KEY, Email NVARCHAR(50));
+INSERT INTO Users (Id, Email) VALUES (1, 'same@example.com'), (2, 'same@example.com');`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const rejected = executeScript(
+    created.state,
+    'CREATE UNIQUE INDEX UX_Users_Email ON Users (Email);'
+  );
+  assert.ok(rejected.result.errors.length > 0);
+  assert.match(rejected.result.errors[0], /UNIQUE أو PRIMARY KEY/);
+  assert.strictEqual(rejected.state.databases.invalidindexdb.tables.users.indexes, undefined);
+
+  const missingColumn = executeScript(
+    created.state,
+    'CREATE INDEX IX_Users_Missing ON Users (MissingColumn);'
+  );
+  assert.ok(missingColumn.result.errors.length > 0);
+  assert.match(missingColumn.result.errors[0], /غير موجود في الجدول/);
+
+  const duplicateColumns = executeScript(
+    created.state,
+    'CREATE INDEX IX_Users_Duplicate ON Users (Email, Email);'
+  );
+  assert.ok(duplicateColumns.result.errors.length > 0);
+  assert.match(duplicateColumns.result.errors[0], /مكررة أو غير صالحة/);
+});
+
+test('Composite UNIQUE INDEX enforces the full column combination', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE CompositeIndexDB;
+USE CompositeIndexDB;
+CREATE TABLE Registrations (Id INT PRIMARY KEY, StudentId INT, CourseId INT);
+INSERT INTO Registrations (Id, StudentId, CourseId) VALUES (1, 10, 20), (2, 10, 21);
+CREATE UNIQUE INDEX UX_Registrations_StudentCourse ON Registrations (StudentId, CourseId);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const validReuse = executeScript(
+    created.state,
+    'INSERT INTO Registrations (Id, StudentId, CourseId) VALUES (3, 10, 22);'
+  );
+  assert.deepStrictEqual(validReuse.result.errors, []);
+
+  const duplicatePair = executeScript(
+    validReuse.state,
+    'INSERT INTO Registrations (Id, StudentId, CourseId) VALUES (4, 10, 20);'
+  );
+  assert.ok(duplicatePair.result.errors.length > 0);
+  assert.strictEqual(duplicatePair.state.databases.compositeindexdb.tables.registrations.rows.length, 3);
+});
+
 test('BEGIN TRANSACTION and ROLLBACK restore the original data', () => {
   const state = createAdminState();
   const result = executeScript(
