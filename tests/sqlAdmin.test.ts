@@ -1145,11 +1145,11 @@ test('sys.index_columns exposes composite index column order and joins to sys.in
 test('sys.key_constraints distinguishes primary-key and unique constraints', () => {
   const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SysKeysDB; USE SysKeysDB; CREATE TABLE Users (Id INT PRIMARY KEY, Email NVARCHAR(50) UNIQUE, UserCode NVARCHAR(20), CONSTRAINT UQ_Users_Code UNIQUE (UserCode));');
   assert.deepStrictEqual(created.result.errors, []);
-  const result = executeScript(created.state, 'SELECT name, type, type_desc FROM sys.key_constraints ORDER BY type;');
+  const result = executeScript(created.state, 'SELECT name, type, type_desc FROM sys.key_constraints ORDER BY unique_index_id;');
   assert.deepStrictEqual(result.result.errors, []);
   assert.deepStrictEqual(result.result.rows, [
     ['PK_Users', 'PK', 'PRIMARY_KEY_CONSTRAINT'],
-    ['UQ_Users_Email', 'UQ', 'UNIQUE_CONSTRAINT'],
     ['UQ_Users_1', 'UQ', 'UNIQUE_CONSTRAINT'],
+    ['UQ_Users_Email', 'UQ', 'UNIQUE_CONSTRAINT'],
   ]);
 });
