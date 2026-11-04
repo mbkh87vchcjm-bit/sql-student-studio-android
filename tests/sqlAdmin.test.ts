@@ -177,6 +177,140 @@ CREATE TABLE Inventory (
   assert.match(dropped.result.errors[0], /PRIMARY KEY أو UNIQUE/);
 });
  
+test('FOREIGN KEY enforces parent references during INSERT and UPDATE', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE ForeignKeyDB;
+USE ForeignKeyDB;
+CREATE TABLE Departments (
+  DepartmentId INT PRIMARY KEY,
+  Name NVARCHAR(30) NOT NULL
+);
+INSERT INTO Departments (DepartmentId, Name) VALUES (1, 'IT'), (2, 'Networks');
+CREATE TABLE Students (
+  StudentId INT PRIMARY KEY,
+  Name NVARCHAR(30) NOT NULL,
+  DepartmentId INT NULL,
+  CONSTRAINT FK_Students_Departments FOREIGN KEY (DepartmentId)
+    REFERENCES Departments(DepartmentId)
+);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const valid = executeScript(
+    created.state,
+    `INSERT INTO Students (StudentId, Name, DepartmentId) VALUES
+      (1, 'Ali', 1),
+      (2, 'Sara', NULL);`
+  );
+  assert.deepStrictEqual(valid.result.errors, []);
+  assert.strictEqual(valid.state.databases.foreignkeydb.tables.students.rows.length, 2);
+
+  const invalidInsert = executeScript(
+    valid.state,
+    "INSERT INTO Students (StudentId, Name, DepartmentId) VALUES (3, 'Mona', 99);"
+  );
+  assert.ok(invalidInsert.result.errors.length > 0);
+  assert.match(invalidInsert.result.errors[0], /لا تطابق أي قيمة/);
+  assert.strictEqual(invalidInsert.state.databases.foreignkeydb.tables.students.rows.length, 2);
+
+  const invalidUpdate = executeScript(
+    valid.state,
+    'UPDATE Students SET DepartmentId = 77 WHERE StudentId = 1;'
+  );
+  assert.ok(invalidUpdate.result.errors.length > 0);
+  assert.match(invalidUpdate.result.errors[0], /لا تطابق أي قيمة/);
+  assert.strictEqual(invalidUpdate.state.databases.foreignkeydb.tables.students.rows[0].DepartmentId, 1);
+});
+
+test('FOREIGN KEY prevents deleting or truncating referenced parent rows and dropping parent tables', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE ReferenceDB;
+USE ReferenceDB;
+CREATE TABLE Departments (Id INT PRIMARY KEY);
+INSERT INTO Departments (Id) VALUES (1), (2);
+CREATE TABLE Students (
+  Id INT PRIMARY KEY,
+  DepartmentId INT,
+  FOREIGN KEY (DepartmentId) REFERENCES Departments(Id)
+);
+INSERT INTO Students (Id, DepartmentId) VALUES (10, 1);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const deleted = executeScript(created.state, 'DELETE FROM Departments WHERE Id = 1;');
+  assert.ok(deleted.result.errors.length > 0);
+  assert.match(deleted.result.errors[0], /مرتبطة بالقيد الخارجي/);
+  assert.strictEqual(deleted.state.databases.referencedb.tables.departments.rows.length, 2);
+
+  const truncated = executeScript(created.state, 'TRUNCATE TABLE Departments;');
+  assert.ok(truncated.result.errors.length > 0);
+  assert.match(truncated.result.errors[0], /مرجع في قيد FOREIGN KEY/);
+  assert.strictEqual(truncated.state.databases.referencedb.tables.departments.rows.length, 2);
+
+  const dropped = executeScript(created.state, 'DROP TABLE Departments;');
+  assert.ok(dropped.result.errors.length > 0);
+  assert.match(dropped.result.errors[0], /مرجع في قيد FOREIGN KEY/);
+  assert.ok(dropped.state.databases.referencedb.tables.departments);
+});
+
+test('FOREIGN KEY definitions must reference an existing single-column primary or unique key', () => {
+  const base = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE ForeignDefinitionDB;
+USE ForeignDefinitionDB;
+CREATE TABLE Departments (
+  Id INT PRIMARY KEY,
+  Name NVARCHAR(30)
+);`
+  );
+  assert.deepStrictEqual(base.result.errors, []);
+
+  const missingTable = executeScript(
+    base.state,
+    'CREATE TABLE MissingChild (Id INT PRIMARY KEY, DepartmentId INT REFERENCES UnknownDepartments(Id));'
+  );
+  assert.ok(missingTable.result.errors.length > 0);
+  assert.match(missingTable.result.errors[0], /غير موجود في قاعدة البيانات/);
+  assert.strictEqual(Boolean(missingTable.state.databases.foreigndefinitiondb.tables.missingchild), false);
+
+  const nonUniqueTarget = executeScript(
+    base.state,
+    'CREATE TABLE BadChild (Id INT PRIMARY KEY, DepartmentName NVARCHAR(30), FOREIGN KEY (DepartmentName) REFERENCES Departments(Name));'
+  );
+  assert.ok(nonUniqueTarget.result.errors.length > 0);
+  assert.match(nonUniqueTarget.result.errors[0], /PRIMARY KEY أو UNIQUE/);
+  assert.strictEqual(Boolean(nonUniqueTarget.state.databases.foreigndefinitiondb.tables.badchild), false);
+});
+
+test('ALTER TABLE ADD FOREIGN KEY validates existing rows before saving the constraint', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE AlterForeignDB;
+USE AlterForeignDB;
+CREATE TABLE Departments (Id INT PRIMARY KEY);
+INSERT INTO Departments (Id) VALUES (1);
+CREATE TABLE Students (Id INT PRIMARY KEY, DepartmentId INT);
+INSERT INTO Students (Id, DepartmentId) VALUES (10, 99);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const altered = executeScript(
+    created.state,
+    'ALTER TABLE Students ADD CONSTRAINT FK_Students_Departments FOREIGN KEY (DepartmentId) REFERENCES Departments(Id);'
+  );
+  assert.ok(altered.result.errors.length > 0);
+  assert.match(altered.result.errors[0], /لا تطابق أي قيمة/);
+  assert.strictEqual(altered.state.databases.alterforeigndb.tables.students.foreignKeys, undefined);
+
+  const afterFailure = executeScript(
+    altered.state,
+    'INSERT INTO Students (Id, DepartmentId) VALUES (11, 100);'
+  );
+  assert.deepStrictEqual(afterFailure.result.errors, []);
+});
+ 
 test('BEGIN TRANSACTION and ROLLBACK restore the original data', () => {
   const state = createAdminState();
   const result = executeScript(
