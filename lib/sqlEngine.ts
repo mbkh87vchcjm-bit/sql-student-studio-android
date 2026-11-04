@@ -2069,7 +2069,13 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (column.defaultValue !== undefined || column.defaultConstraintName) {
       return errorResult(state, start, 'العمود "' + columnName + '" لديه قيمة DEFAULT بالفعل.');
     }
-    column.defaultValue = parseValue(match[3].trim());
+    let defaultValue: SqlValue;
+    try {
+      defaultValue = coerceColumnValue(parseValue(match[3].trim()), column);
+    } catch (error) {
+      return errorResult(state, start, error instanceof Error ? error.message : String(error));
+    }
+    column.defaultValue = defaultValue;
     column.defaultConstraintName = constraintName;
     return success(state, start, { messages: ['تمت إضافة قيد DEFAULT "' + constraintName + '" للعمود "' + columnName + '".'] });
   }
@@ -2141,6 +2147,13 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const rest = match[4] ?? '';
     const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|\s+CHECK\b|$)/i);
     const namedDefaultMatch = rest.match(/\bCONSTRAINT\s+([\[\]\w-]+)\s+DEFAULT\b/i);
+    if (namedDefaultMatch) {
+      const defaultName = cleanName(namedDefaultMatch[1]);
+      const alreadyUsed = table.columns.some((column) => keyOf(column.defaultConstraintName ?? '') === keyOf(defaultName))
+        || (table.foreignKeys ?? []).some((foreignKey) => keyOf(foreignKey.name) === keyOf(defaultName))
+        || (table.checkConstraints ?? []).some((constraint) => keyOf(constraint.name) === keyOf(defaultName));
+      if (alreadyUsed) return errorResult(state, start, 'اسم القيد "' + defaultName + '" مستخدم بالفعل في الجدول.');
+    }
     const newColumn: ColumnModel = {
       name: columnName,
       type: match[3].toUpperCase().replace(/\s+/g, ''),
