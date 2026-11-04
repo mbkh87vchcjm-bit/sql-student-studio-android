@@ -1675,7 +1675,10 @@ function validateForeignKeyRows(database: DatabaseModel, table: TableModel, rows
     for (const row of rows) {
       const value = row[sourceColumn.name] ?? null;
       if (value === null) continue;
-      const exists = parentTable.rows.some((parentRow) =>
+      const referencedRows = keyOf(parentTable.name) === keyOf(table.name)
+        ? rows
+        : parentTable.rows;
+      const exists = referencedRows.some((parentRow) =>
         sameSqlValue(parentRow[parentColumn.name] ?? null, value)
       );
       if (!exists) {
