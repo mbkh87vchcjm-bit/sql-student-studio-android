@@ -1248,6 +1248,106 @@ function informationSchemaData(sourceName: string, database: DatabaseModel): Vir
   return null;
 }
 
+/**
+ * Simplified SQL Server-style sys catalog. Object IDs are stable simulator IDs,
+ * not native SQL Server object IDs; all objects use the simulated dbo schema.
+ */
+function systemCatalogData(sourceName: string, database: DatabaseModel): VirtualCatalogData | null {
+  const source = keyOf(sourceName);
+  const tables = Object.values(database.tables);
+  const views = Object.values(database.views ?? {});
+  const objects = [
+    ...tables.map((item) => ({ name: item.name, type: 'U', typeDesc: 'USER_TABLE' })),
+    ...views.map((item) => ({ name: item.name, type: 'V', typeDesc: 'VIEW' })),
+  ].sort((a, b) => keyOf(a.name).localeCompare(keyOf(b.name)));
+  const objectIds = new Map(objects.map((item, index) => [keyOf(item.name), 1000 + index]));
+  const idFor = (name: string) => objectIds.get(keyOf(name)) ?? null;
+  const objectColumns = ['object_id', 'name', 'schema_id', 'type', 'type_desc', 'is_ms_shipped'];
+
+  if (source === 'sys.schemas') {
+    return { columns: ['schema_id', 'name'], rows: [{ schema_id: 1, name: 'dbo' }] };
+  }
+
+  if (source === 'sys.objects' || source === 'sys.tables' || source === 'sys.views') {
+    const selected = objects.filter((item) =>
+      source === 'sys.objects' || (source === 'sys.tables' ? item.type === 'U' : item.type === 'V')
+    );
+    return {
+      columns: objectColumns,
+      rows: selected.map((item) => ({
+        object_id: idFor(item.name),
+        name: item.name,
+        schema_id: 1,
+        type: item.type,
+        type_desc: item.typeDesc,
+        is_ms_shipped: 0,
+      })),
+    };
+  }
+
+  if (source === 'sys.columns') {
+    const columns = ['object_id', 'column_id', 'name', 'system_type_id', 'max_length', 'precision', 'scale', 'is_nullable', 'is_identity'];
+    const typeIds: Record<string, number> = {
+      BIGINT: 127, BIT: 104, CHAR: 175, DATE: 40, DATETIME: 61, DATETIME2: 42,
+      DECIMAL: 106, FLOAT: 62, INT: 56, NCHAR: 239, NUMERIC: 108,
+      NVARCHAR: 231, REAL: 59, SMALLINT: 52, TIME: 41, TINYINT: 48, VARCHAR: 167,
+    };
+    const fixedLengths: Record<string, number> = {
+      BIGINT: 8, BIT: 1, DATE: 3, DATETIME: 8, DATETIME2: 8, FLOAT: 8,
+      INT: 4, REAL: 4, SMALLINT: 2, TIME: 5, TINYINT: 1,
+    };
+    const rows: StoredRow[] = [];
+
+    for (const table of tables) {
+      table.columns.forEach((column, index) => {
+        const normalized = column.type.toUpperCase();
+        const baseType = normalized.match(/^[A-Z]+/)?.[0] ?? normalized;
+        const args = normalized.match(/\(([^)]+)\)/)?.[1]?.split(',').map((part) => part.trim()) ?? [];
+        let maxLength: SqlValue = fixedLengths[baseType] ?? null;
+        let precision: SqlValue = null;
+        let scale: SqlValue = null;
+        if (['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR'].includes(baseType) && args.length) {
+          const length = args[0].toUpperCase() === 'MAX' ? -1 : Number.parseInt(args[0], 10);
+          maxLength = length < 0 ? -1 : length * (baseType === 'NCHAR' || baseType === 'NVARCHAR' ? 2 : 1);
+        }
+        if (baseType === 'DECIMAL' || baseType === 'NUMERIC') {
+          precision = args[0] ? Number.parseInt(args[0], 10) : 18;
+          scale = args[1] ? Number.parseInt(args[1], 10) : 0;
+          maxLength = Number(precision) <= 9 ? 5 : Number(precision) <= 19 ? 9 : Number(precision) <= 28 ? 13 : 17;
+        }
+        rows.push({
+          object_id: idFor(table.name),
+          column_id: index + 1,
+          name: column.name,
+          system_type_id: typeIds[baseType] ?? null,
+          max_length: maxLength,
+          precision,
+          scale,
+          is_nullable: column.nullable ? 1 : 0,
+          is_identity: column.identity ? 1 : 0,
+        });
+      });
+    }
+
+    for (const view of views) {
+      (view.columns ?? []).forEach((name, index) => rows.push({
+        object_id: idFor(view.name),
+        column_id: index + 1,
+        name,
+        system_type_id: null,
+        max_length: null,
+        precision: null,
+        scale: null,
+        is_nullable: 1,
+        is_identity: 0,
+      }));
+    }
+    return { columns, rows };
+  }
+
+  return null;
+}
+
 interface ParsedTableSource {
   alias: string;
   tableName: string;
@@ -1296,7 +1396,7 @@ function parseTableSource(
   const alias = cleanName(parts[1] || parts[0]);
   const sourceId = `tbl_${sourceIndex}_${alias}`;
 
-  const catalogData = informationSchemaData(tableName, database);
+  const catalogData = informationSchemaData(tableName, database) ?? systemCatalogData(tableName, database);
   if (catalogData) {
     const rows: StoredRow[] = catalogData.rows.map((record) => {
       const obj: StoredRow = {};

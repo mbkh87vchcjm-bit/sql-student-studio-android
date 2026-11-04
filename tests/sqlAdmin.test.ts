@@ -1013,3 +1013,48 @@ test('DBCC CHECKIDENT rejects non-identity tables and invalid reseed values atom
   assert.ok(badMode.result.errors.length > 0);
   assert.strictEqual(created.state.databases.identitydb.tables.plaintable.columns[0].identity, undefined);
 });
+
+
+/* SQL Server-style sys catalog subset */
+
+test('sys.tables, sys.views and sys.objects list simulated objects', () => {
+  const state = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT PRIMARY KEY, Name NVARCHAR(50)); CREATE VIEW StudentNames AS SELECT Name FROM Students;');
+  assert.deepStrictEqual(state.result.errors, []);
+  const tables = executeScript(state.state, 'SELECT name, type_desc FROM sys.tables;');
+  assert.deepStrictEqual(tables.result.errors, []);
+  assert.deepStrictEqual(tables.result.rows, [['Students', 'USER_TABLE']]);
+  const views = executeScript(state.state, 'SELECT name, type_desc FROM sys.views;');
+  assert.deepStrictEqual(views.result.errors, []);
+  assert.deepStrictEqual(views.result.rows, [['StudentNames', 'VIEW']]);
+  const objects = executeScript(state.state, 'SELECT name, type FROM sys.objects ORDER BY name;');
+  assert.deepStrictEqual(objects.result.errors, []);
+  assert.deepStrictEqual(objects.result.rows, [['StudentNames', 'V'], ['Students', 'U']]);
+});
+
+test('sys.columns joins to sys.tables through stable simulator object IDs', () => {
+  const state = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT IDENTITY(10,5) PRIMARY KEY, Name NVARCHAR(50) NOT NULL, Score DECIMAL(10,2));');
+  assert.deepStrictEqual(state.result.errors, []);
+  const result = executeScript(state.state, "SELECT t.name, c.name, c.column_id, c.system_type_id, c.max_length, c.is_nullable, c.is_identity FROM sys.tables AS t INNER JOIN sys.columns AS c ON t.object_id = c.object_id WHERE t.name = 'Students' ORDER BY c.column_id;");
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['Students', 'Id', '1', '56', '4', '0', '1'],
+    ['Students', 'Name', '2', '231', '100', '0', '0'],
+    ['Students', 'Score', '3', '106', '9', '1', '0'],
+  ]);
+});
+
+test('sys.columns exposes view output names with unknown expression types as NULL', () => {
+  const state = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT, Name NVARCHAR(50)); CREATE VIEW StudentNames AS SELECT Name AS DisplayName FROM Students;');
+  assert.deepStrictEqual(state.result.errors, []);
+  const result = executeScript(state.state, "SELECT c.name, c.system_type_id FROM sys.views AS v INNER JOIN sys.columns AS c ON v.object_id = c.object_id WHERE v.name = 'StudentNames';");
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [['DisplayName', 'NULL']]);
+});
+
+test('sys.schemas exposes the simulator dbo schema', () => {
+  const state = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT);');
+  assert.deepStrictEqual(state.result.errors, []);
+  const result = executeScript(state.state, 'SELECT schema_id, name FROM sys.schemas;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [['1', 'dbo']]);
+});
