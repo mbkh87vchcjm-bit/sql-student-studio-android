@@ -105,6 +105,78 @@ test('CREATE TABLE IF NOT EXISTS does not overwrite an existing table', () => {
   assert.strictEqual(created.state.databases.admindb.tables.ledger.columns.length, 3);
 });
 
+test('Composite PRIMARY KEY enforces key tuples instead of individual columns', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE ConstraintDB;
+USE ConstraintDB;
+CREATE TABLE Enrollment (
+  StudentId INT,
+  CourseId INT,
+  Grade INT,
+  CONSTRAINT PK_Enrollment PRIMARY KEY (StudentId, CourseId),
+  CONSTRAINT UQ_Enrollment_CourseGrade UNIQUE (CourseId, Grade)
+);
+INSERT INTO Enrollment (StudentId, CourseId, Grade) VALUES
+  (1, 10, 80),
+  (2, 10, 90);`
+  );
+
+  assert.deepStrictEqual(created.result.errors, []);
+  const table = created.state.databases.constraintdb.tables.enrollment;
+  assert.deepStrictEqual(table.primaryKeyColumns, ['StudentId', 'CourseId']);
+  assert.strictEqual(table.columns.find((column) => column.name === 'StudentId')?.nullable, false);
+  assert.strictEqual(table.columns.find((column) => column.name === 'CourseId')?.nullable, false);
+
+  const validReuse = executeScript(
+    created.state,
+    'INSERT INTO Enrollment (StudentId, CourseId, Grade) VALUES (1, 11, 85);'
+  );
+  assert.deepStrictEqual(validReuse.result.errors, []);
+  assert.strictEqual(validReuse.state.databases.constraintdb.tables.enrollment.rows.length, 3);
+
+  const duplicateKey = executeScript(
+    validReuse.state,
+    'INSERT INTO Enrollment (StudentId, CourseId, Grade) VALUES (1, 10, 75);'
+  );
+  assert.ok(duplicateKey.result.errors.length > 0);
+  assert.match(duplicateKey.result.errors[0], /UNIQUE أو PRIMARY KEY/);
+
+  const duplicateUniqueTuple = executeScript(
+    validReuse.state,
+    'INSERT INTO Enrollment (StudentId, CourseId, Grade) VALUES (3, 10, 90);'
+  );
+  assert.ok(duplicateUniqueTuple.result.errors.length > 0);
+  assert.match(duplicateUniqueTuple.result.errors[0], /UNIQUE أو PRIMARY KEY/);
+
+  const nullPrimaryPart = executeScript(
+    validReuse.state,
+    'INSERT INTO Enrollment (StudentId, CourseId, Grade) VALUES (NULL, 12, 88);'
+  );
+  assert.ok(nullPrimaryPart.result.errors.length > 0);
+  assert.match(nullPrimaryPart.result.errors[0], /لا يقبل NULL/);
+});
+
+test('Composite and table-level UNIQUE constraints protect their columns', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE UniqueDB;
+USE UniqueDB;
+CREATE TABLE Inventory (
+  WarehouseId INT,
+  ProductId INT,
+  Quantity INT,
+  CONSTRAINT PK_Inventory PRIMARY KEY (WarehouseId, ProductId),
+  CONSTRAINT UQ_Inventory_WarehouseQuantity UNIQUE (WarehouseId, Quantity)
+);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const dropped = executeScript(created.state, 'ALTER TABLE Inventory DROP COLUMN Quantity;');
+  assert.ok(dropped.result.errors.length > 0);
+  assert.match(dropped.result.errors[0], /PRIMARY KEY أو UNIQUE/);
+});
+ 
 test('BEGIN TRANSACTION and ROLLBACK restore the original data', () => {
   const state = createAdminState();
   const result = executeScript(
