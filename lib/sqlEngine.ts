@@ -1,5 +1,11 @@
 export type SqlValue = string | number | boolean | null;
 
+export interface IdentityModel {
+  seed: number;
+  increment: number;
+  nextValue: number;
+}
+
 export interface ColumnModel {
   name: string;
   type: string;
@@ -9,6 +15,8 @@ export interface ColumnModel {
   defaultValue?: SqlValue;
   /** Optional name for a SQL Server DEFAULT constraint. */
   defaultConstraintName?: string;
+  /** Optional IDENTITY metadata, persisted with this table. */
+  identity?: IdentityModel;
 }
 
 export type StoredRow = Record<string, SqlValue>;
@@ -55,6 +63,8 @@ export interface DatabaseModel {
 export interface EngineState {
   databases: Record<string, DatabaseModel>;
   currentDatabase: string | null;
+  /** The one table currently enabled for explicit identity values. */
+  identityInsertTable?: string | null;
 }
 
 export interface ExecutionResult {
@@ -1868,6 +1878,30 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   const database = databaseFor(state);
   if (!database) return errorResult(state, start, 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.');
 
+  // SET IDENTITY_INSERT table ON | OFF
+  match = sql.match(/^SET\\s+IDENTITY_INSERT\\s+([\\[\\]\\w.-]+)\\s+(ON|OFF)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    if (!table.columns.some((column) => column.identity)) {
+      return errorResult(state, start, 'الجدول "' + tableName + '" لا يحتوي على عمود IDENTITY.');
+    }
+    const identityKey = keyOf(database.name + '.' + table.name);
+    if (match[2].toUpperCase() === 'ON') {
+      if (state.identityInsertTable && keyOf(state.identityInsertTable) !== identityKey) {
+        return errorResult(state, start, 'لا يمكن تفعيل IDENTITY_INSERT لأكثر من جدول واحد في الجلسة نفسها.');
+      }
+      state.identityInsertTable = identityKey;
+      return success(state, start, { messages: ['تم تفعيل IDENTITY_INSERT للجدول "' + tableName + '".'] });
+    }
+    if (state.identityInsertTable && keyOf(state.identityInsertTable) !== identityKey) {
+      return errorResult(state, start, 'IDENTITY_INSERT مفعّل لجدول آخر؛ أوقفه أولًا.');
+    }
+    state.identityInsertTable = null;
+    return success(state, start, { messages: ['تم إيقاف IDENTITY_INSERT للجدول "' + tableName + '".'] });
+  }
+
   // 4. CREATE TABLE
   const createIfNotExists = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b/i.test(sql);
   match = sql.match(/^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([[\]\w.-]+)\s*\(([\s\S]*)\)$/i);
@@ -1924,6 +1958,20 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       const rest = columnMatch[3] ?? '';
       const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|\s+CHECK\b|$)/i);
       const namedDefaultMatch = rest.match(/\bCONSTRAINT\s+([\[\]\w-]+)\s+DEFAULT\b/i);
+      const identityKeyword = /\bIDENTITY\b/i.test(rest);
+      const identityMatch = rest.match(/\bIDENTITY(?:\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\))?/i);
+      if (identityKeyword && !identityMatch) {
+        return errorResult(state, start, 'صيغة IDENTITY غير صالحة. استخدم IDENTITY أو IDENTITY(seed, increment).');
+      }
+      const identityType = columnMatch[2].toUpperCase().replace(/\s+/g, '').match(/^[A-Z]+/)?.[0] ?? '';
+      if (identityMatch && !['TINYINT', 'SMALLINT', 'INT', 'BIGINT'].includes(identityType)) {
+        return errorResult(state, start, 'يجب أن يكون نوع عمود IDENTITY عددًا صحيحًا مثل INT أو BIGINT.');
+      }
+      const identitySeed = identityMatch?.[1] === undefined ? 1 : Number(identityMatch[1]);
+      const identityIncrement = identityMatch?.[2] === undefined ? 1 : Number(identityMatch[2]);
+      if (identityMatch && (!Number.isSafeInteger(identitySeed) || !Number.isSafeInteger(identityIncrement) || identityIncrement === 0)) {
+        return errorResult(state, start, 'قيم IDENTITY يجب أن تكون أعدادًا صحيحة آمنة، ولا يجوز أن يكون increment صفرًا.');
+      }
       const inlineCheck = rest.match(/\bCHECK\s*\(([\s\S]*)\)\s*$/i);
       if (inlineCheck) {
         tableCheckConstraints.push({
@@ -1943,15 +1991,19 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       columns.push({
         name: cleanName(columnMatch[1]),
         type: columnMatch[2].toUpperCase().replace(/\s+/g, ''),
-        nullable: !/\bNOT\s+NULL\b/i.test(rest) && !/\bPRIMARY\s+KEY\b/i.test(rest),
+        nullable: !identityMatch && !/\bNOT\s+NULL\b/i.test(rest) && !/\bPRIMARY\s+KEY\b/i.test(rest),
         primaryKey: /\bPRIMARY\s+KEY\b/i.test(rest),
         unique: /\bUNIQUE\b/i.test(rest),
         defaultValue: defaultMatch ? parseValue(defaultMatch[1].trim()) : undefined,
         ...(namedDefaultMatch ? { defaultConstraintName: cleanName(namedDefaultMatch[1]) } : {}),
+        ...(identityMatch ? { identity: { seed: identitySeed, increment: identityIncrement, nextValue: identitySeed } } : {}),
       });
     }
     const duplicateColumn = columns.find((column, index) => columns.some((other, otherIndex) => otherIndex !== index && keyOf(other.name) === keyOf(column.name)));
     if (duplicateColumn) return errorResult(state, start, `اسم العمود "${duplicateColumn.name}" مكرر.`);
+    if (columns.filter((column) => column.identity).length > 1) {
+      return errorResult(state, start, 'يسمح SQL Server بعمود IDENTITY واحد فقط في كل جدول.');
+    }
     if (new Set(tablePrimaryKeys.map(keyOf)).size !== tablePrimaryKeys.length) {
       return errorResult(state, start, 'لا يجوز تكرار العمود داخل قيد PRIMARY KEY.');
     }
