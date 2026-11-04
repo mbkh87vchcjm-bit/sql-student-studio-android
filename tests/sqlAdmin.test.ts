@@ -1064,3 +1064,15 @@ test('sys.schemas exposes the simulator dbo schema', () => {
   assert.deepStrictEqual(result.result.errors, []);
   assert.deepStrictEqual(result.result.rows, [['1', 'dbo']]);
 });
+
+
+test('CREATE VIEW validates columns on an empty base table and remains queryable', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE EmptyViewDB; USE EmptyViewDB; CREATE TABLE Students (Id INT, FullName NVARCHAR(50));');
+  assert.deepStrictEqual(created.result.errors, []);
+  const viewCreated = executeScript(created.state, 'CREATE VIEW StudentNames AS SELECT FullName FROM Students WHERE Id > 0;');
+  assert.deepStrictEqual(viewCreated.result.errors, []);
+  const selected = executeScript(viewCreated.state, 'SELECT FullName FROM StudentNames;');
+  assert.deepStrictEqual(selected.result.errors, []);
+  assert.deepStrictEqual(selected.result.rows, []);
+  assert.deepStrictEqual(selected.result.columns, ['FullName']);
+});

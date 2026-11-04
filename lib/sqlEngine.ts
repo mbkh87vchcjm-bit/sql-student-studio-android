@@ -1657,7 +1657,27 @@ function executeSelectInternal(sql: string, engineState: EngineState, outerRow?:
     sources = [];
   }
 
-  const sampleValidationRow = rows[0] ?? {};
+  const sampleValidationRow: StoredRow = rows[0] ? { ...rows[0] } : {};
+  if (rows.length === 0 && sources.length > 0) {
+    // Validate SELECT expressions against schema metadata even when a source table is empty.
+    const columnCounts = new Map<string, number>();
+    for (const source of sources) {
+      for (const columnName of source.columns) {
+        const columnKey = keyOf(columnName);
+        columnCounts.set(columnKey, (columnCounts.get(columnKey) ?? 0) + 1);
+        sampleValidationRow[`${source.tableName}.${columnName}`] = null;
+        sampleValidationRow[`${source.alias}.${columnName}`] = null;
+        sampleValidationRow[`${source.sourceId}::${columnName}`] = null;
+      }
+    }
+    for (const source of sources) {
+      for (const columnName of source.columns) {
+        if (columnCounts.get(keyOf(columnName)) === 1) {
+          sampleValidationRow[columnName] = null;
+        }
+      }
+    }
+  }
 
   // 2. WHERE Filtering
   if (whereClause) {
