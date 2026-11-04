@@ -1821,7 +1821,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const tableForeignKeys: ForeignKeyModel[] = [];
     const tableCheckConstraints: CheckConstraintModel[] = [];
     for (const definition of definitions) {
-      const tableCheck = definition.match(/^(?:CONSTRAINT\\s+([\\[\\]\\w-]+)\\s+)?CHECK\\s*\\(([\\s\\S]*)\\)$/i);
+      const tableCheck = definition.match(/^(?:CONSTRAINT\s+([\[\]\w-]+)\s+)?CHECK\s*\(([\s\S]*)\)$/i);
       if (tableCheck) {
         tableCheckConstraints.push({
           name: cleanName(tableCheck[1] ?? ('CK_' + name + '_' + (tableCheckConstraints.length + 1))),
@@ -1989,7 +1989,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   }
 
   // ALTER TABLE ADD CHECK CONSTRAINT
-  match = sql.match(/^ALTER\\s+TABLE\\s+([\\[\\]\\w.-]+)\\s+ADD\\s+(?:CONSTRAINT\\s+([\\[\\]\\w-]+)\\s+)?CHECK\\s*\\(([\\s\\S]*)\\)$/i);
+  match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+ADD\s+(?:CONSTRAINT\s+([\[\]\w-]+)\s+)?CHECK\s*\(([\s\S]*)\)$/i);
   if (match) {
     const tableName = cleanName(match[1]);
     const table = tableFor(database, tableName);
