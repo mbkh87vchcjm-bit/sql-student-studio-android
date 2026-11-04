@@ -794,3 +794,96 @@ DELETE FROM Ledger WHERE Id = 1;`
   assert.ok(result.result.errors.some((message) => message.includes('دون تنفيذ COMMIT')));
   assert.strictEqual(result.state.databases.admindb.tables.ledger.rows.length, 2);
 });
+
+
+/* ==========================================================================
+   VIEWS: live SELECT-backed schema objects
+   ========================================================================== */
+
+test('CREATE VIEW exposes a live filtered SELECT and supports WHERE / ORDER BY', () => {
+  const state = createAdminState();
+  const created = executeScript(state, 'CREATE VIEW HighBalances AS SELECT Id, Name, Balance FROM Ledger WHERE Balance >= 200;');
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.ok(created.state.databases.admindb.views?.highbalances);
+
+  const selected = executeScript(created.state, 'SELECT Id, Name FROM HighBalances ORDER BY Id;');
+  assert.deepStrictEqual(selected.result.errors, []);
+  assert.deepStrictEqual(selected.result.columns, ['Id', 'Name']);
+  assert.deepStrictEqual(selected.result.rows, [['2', 'Deposit']]);
+});
+
+test('VIEW results are recalculated after base-table INSERT and UPDATE', () => {
+  const state = createAdminState();
+  const created = executeScript(state, 'CREATE VIEW LedgerView AS SELECT Id, Name, Balance FROM Ledger WHERE Balance >= 200;');
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const updated = executeScript(created.state, 'UPDATE Ledger SET Balance = 300 WHERE Id = 1;');
+  assert.deepStrictEqual(updated.result.errors, []);
+  const selected = executeScript(updated.state, 'SELECT Id, Balance FROM LedgerView ORDER BY Id;');
+  assert.deepStrictEqual(selected.result.errors, []);
+  assert.deepStrictEqual(selected.result.rows, [['1', '300'], ['2', '250']]);
+});
+
+test('Nested views resolve their underlying view definitions', () => {
+  const state = createAdminState();
+  const first = executeScript(state, 'CREATE VIEW PositiveBalances AS SELECT Id, Name, Balance FROM Ledger WHERE Balance > 0;');
+  assert.deepStrictEqual(first.result.errors, []);
+  const second = executeScript(first.state, 'CREATE VIEW NamedBalances AS SELECT Name, Balance FROM PositiveBalances WHERE Name <> \'Opening\';');
+  assert.deepStrictEqual(second.result.errors, []);
+
+  const selected = executeScript(second.state, 'SELECT Name, Balance FROM NamedBalances;');
+  assert.deepStrictEqual(selected.result.errors, []);
+  assert.deepStrictEqual(selected.result.rows, [['Deposit', '250']]);
+});
+
+test('ALTER VIEW replaces its validated query definition', () => {
+  const state = createAdminState();
+  const created = executeScript(state, 'CREATE VIEW LedgerView AS SELECT Id, Name FROM Ledger;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const altered = executeScript(created.state, 'ALTER VIEW LedgerView AS SELECT Id, Balance FROM Ledger WHERE Balance > 150;');
+  assert.deepStrictEqual(altered.result.errors, []);
+
+  const selected = executeScript(altered.state, 'SELECT Id, Balance FROM LedgerView;');
+  assert.deepStrictEqual(selected.result.errors, []);
+  assert.deepStrictEqual(selected.result.rows, [['2', '250']]);
+});
+
+test('VIEW creation rejects invalid source references and duplicate output names', () => {
+  const state = createAdminState();
+  const invalidSource = executeScript(state, 'CREATE VIEW BrokenView AS SELECT MissingColumn FROM Ledger;');
+  assert.ok(invalidSource.result.errors.length > 0);
+  assert.match(invalidSource.result.errors[0], /تعريف VIEW غير صالح/);
+  assert.strictEqual(invalidSource.state.databases.admindb.views, undefined);
+
+  const duplicateNames = executeScript(state, 'CREATE VIEW DuplicateNames AS SELECT Id, Name AS Id FROM Ledger;');
+  assert.ok(duplicateNames.result.errors.length > 0);
+  assert.match(duplicateNames.result.errors[0], /أسماء أعمدة العرض يجب أن تكون فريدة/);
+});
+
+test('DROP VIEW removes the view and supports IF EXISTS', () => {
+  const state = createAdminState();
+  const created = executeScript(state, 'CREATE VIEW LedgerView AS SELECT Id, Name FROM Ledger;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const dropped = executeScript(created.state, 'DROP VIEW LedgerView;');
+  assert.deepStrictEqual(dropped.result.errors, []);
+  assert.strictEqual(dropped.state.databases.admindb.views, undefined);
+
+  const missing = executeScript(dropped.state, 'DROP VIEW IF EXISTS LedgerView;');
+  assert.deepStrictEqual(missing.result.errors, []);
+  const query = executeScript(missing.state, 'SELECT * FROM LedgerView;');
+  assert.ok(query.result.errors.length > 0);
+});
+
+test('VIEW names cannot collide with tables and invalid ALTER VIEW is atomic', () => {
+  const state = createAdminState();
+  const collision = executeScript(state, 'CREATE VIEW Ledger AS SELECT Id FROM Ledger;');
+  assert.ok(collision.result.errors.length > 0);
+
+  const created = executeScript(state, 'CREATE VIEW LedgerView AS SELECT Id, Name FROM Ledger;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const invalidAlter = executeScript(created.state, 'ALTER VIEW LedgerView AS SELECT UnknownColumn FROM Ledger;');
+  assert.ok(invalidAlter.result.errors.length > 0);
+  const stillWorks = executeScript(invalidAlter.state, 'SELECT Id, Name FROM LedgerView ORDER BY Id;');
+  assert.deepStrictEqual(stillWorks.result.errors, []);
+  assert.deepStrictEqual(stillWorks.result.rows, [['1', 'Opening'], ['2', 'Deposit']]);
+});

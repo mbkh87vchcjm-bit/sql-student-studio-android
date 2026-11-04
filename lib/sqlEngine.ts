@@ -55,9 +55,17 @@ export interface TableModel {
   indexes?: IndexModel[];
 }
 
+export interface ViewModel {
+  name: string;
+  /** The SELECT definition is re-evaluated whenever the view is queried. */
+  definition: string;
+}
+
 export interface DatabaseModel {
   name: string;
   tables: Record<string, TableModel>;
+  /** Optional for backward compatibility with saved databases from older versions. */
+  views?: Record<string, ViewModel>;
 }
 
 export interface EngineState {
@@ -139,6 +147,9 @@ function databaseFor(state: EngineState): DatabaseModel | null {
 function tableFor(database: DatabaseModel, name: string): TableModel | null {
   return database.tables[keyOf(name)] ?? null;
 }
+
+/** Synchronous query execution makes this transient guard safe across nested SELECT calls. */
+const activeViewResolutions = new Set<string>();
 
 /* ==========================================================================
    TOKENIZER & PARSER HELPERS
@@ -1092,7 +1103,40 @@ function parseTableSource(
   const sourceId = `tbl_${sourceIndex}_${alias}`;
 
   const table = tableFor(database, tableName);
-  if (!table) throw new Error(`الجدول "${tableName}" غير موجود في قاعدة البيانات.`);
+  if (!table) {
+    const view = database.views?.[keyOf(tableName)];
+    if (!view) throw new Error(`الجدول أو العرض "${tableName}" غير موجود في قاعدة البيانات.`);
+
+    const viewKey = keyOf(`${database.name}.${view.name}`);
+    if (activeViewResolutions.has(viewKey)) {
+      throw new Error(`تم اكتشاف اعتماد دائري بين العروض أثناء قراءة "${view.name}".`);
+    }
+
+    let viewResult: SelectInternalResult | null = null;
+    activeViewResolutions.add(viewKey);
+    try {
+      viewResult = executeQueryWithSetOperators(view.definition, engineState);
+    } finally {
+      activeViewResolutions.delete(viewKey);
+    }
+    if (!viewResult) throw new Error(`تعذر تنفيذ تعريف العرض "${view.name}".`);
+    if (viewResult.error) throw new Error(`تعذر تنفيذ العرض "${view.name}": ${viewResult.error}`);
+
+    const colNames = viewResult.columns;
+    const rows: StoredRow[] = viewResult.rows.map((resultRow) => {
+      const obj: StoredRow = {};
+      colNames.forEach((columnName, index) => {
+        const value = parseValue(resultRow[index] ?? 'NULL');
+        obj[`${tableName}.${columnName}`] = value;
+        obj[`${alias}.${columnName}`] = value;
+        obj[`${sourceId}::${columnName}`] = value;
+        obj[columnName] = value;
+      });
+      return obj;
+    });
+
+    return { alias, tableName, sourceId, columns: colNames, rows };
+  }
 
   const colNames = table.columns.map((c) => c.name);
 
@@ -1878,6 +1922,59 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   const database = databaseFor(state);
   if (!database) return errorResult(state, start, 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.');
 
+  // CREATE / ALTER VIEW: persist a validated SELECT definition, not a snapshot of rows.
+  match = sql.match(/^CREATE\\s+VIEW\\s+([\\[\\]\\w.-]+)\\s+AS\\s+([\\s\\S]+)$/i);
+  if (match) {
+    const viewName = cleanName(match[1]);
+    const viewKey = keyOf(viewName);
+    if (tableFor(database, viewName)) return errorResult(state, start, `لا يمكن إنشاء العرض "${viewName}" لأن الاسم مستخدم لجدول.`);
+    if (database.views?.[viewKey]) return errorResult(state, start, `العرض "${viewName}" موجود بالفعل.`);
+    const definition = match[2].trim();
+    if (!/^SELECT\\b/i.test(definition)) return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
+    const validation = executeQueryWithSetOperators(definition, state);
+    if (validation.error) return errorResult(state, start, `تعريف VIEW غير صالح: ${validation.error}`);
+    const duplicateColumns = validation.columns.filter((column, index) =>
+      validation.columns.findIndex((candidate) => keyOf(candidate) === keyOf(column)) !== index
+    );
+    if (duplicateColumns.length) return errorResult(state, start, `أسماء أعمدة العرض يجب أن تكون فريدة؛ الاسم المكرر: "${duplicateColumns[0]}".`);
+    database.views ??= {};
+    database.views[viewKey] = { name: viewName, definition };
+    return success(state, start, { messages: [`تم إنشاء العرض "${viewName}" بنجاح. يعاد تنفيذ تعريفه عند كل SELECT.`] });
+  }
+
+  match = sql.match(/^ALTER\\s+VIEW\\s+([\\[\\]\\w.-]+)\\s+AS\\s+([\\s\\S]+)$/i);
+  if (match) {
+    const viewName = cleanName(match[1]);
+    const viewKey = keyOf(viewName);
+    const view = database.views?.[viewKey];
+    if (!view) return errorResult(state, start, `العرض "${viewName}" غير موجود.`);
+    const definition = match[2].trim();
+    if (!/^SELECT\\b/i.test(definition)) return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
+    const validation = executeQueryWithSetOperators(definition, state);
+    if (validation.error) return errorResult(state, start, `تعريف VIEW غير صالح: ${validation.error}`);
+    const duplicateColumns = validation.columns.filter((column, index) =>
+      validation.columns.findIndex((candidate) => keyOf(candidate) === keyOf(column)) !== index
+    );
+    if (duplicateColumns.length) return errorResult(state, start, `أسماء أعمدة العرض يجب أن تكون فريدة؛ الاسم المكرر: "${duplicateColumns[0]}".`);
+    view.definition = definition;
+    return success(state, start, { messages: [`تم تعديل تعريف العرض "${viewName}".`] });
+  }
+
+  match = sql.match(/^DROP\\s+VIEW\\s+(IF\\s+EXISTS\\s+)?([\\[\\]\\w.-]+)$/i);
+  if (match) {
+    const viewName = cleanName(match[2]);
+    const viewKey = keyOf(viewName);
+    const view = database.views?.[viewKey];
+    if (!view) {
+      return match[1]
+        ? success(state, start, { messages: [`العرض "${viewName}" غير موجود؛ لم يتغير شيء.`] })
+        : errorResult(state, start, `العرض "${viewName}" غير موجود.`);
+    }
+    delete database.views![viewKey];
+    if (Object.keys(database.views!).length === 0) delete database.views;
+    return success(state, start, { messages: [`تم حذف العرض "${viewName}".`] });
+  }
+
   // SET IDENTITY_INSERT table ON | OFF
   match = sql.match(/^SET\s+IDENTITY_INSERT\s+([\[\]\w.-]+)\s+(ON|OFF)$/i);
   if (match) {
@@ -1907,7 +2004,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   match = sql.match(/^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([[\]\w.-]+)\s*\(([\s\S]*)\)$/i);
   if (match) {
     const name = cleanName(match[1]);
-    if (tableFor(database, name)) {
+    if (tableFor(database, name) || database.views?.[keyOf(name)]) {
       return createIfNotExists
         ? success(state, start, { messages: [`الجدول "${name}" موجود بالفعل؛ لم يتم تغييره.`] })
         : errorResult(state, start, `الجدول "${name}" موجود بالفعل.`);
