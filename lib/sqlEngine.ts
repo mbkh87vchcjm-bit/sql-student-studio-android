@@ -297,6 +297,51 @@ export function findKeywordOutside(value: string, keyword: string, startIndex = 
   return -1;
 }
 
+function findLogicalAndOutside(value: string): number {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  let pendingBetween = 0;
+
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    const next = value[i + 1];
+    if (quote) {
+      if (char === quote && next === quote) i += 1;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')') {
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 0 || !/[A-Za-z_]/.test(char)) continue;
+
+    const tokenMatch = value.slice(i).match(/^[A-Za-z_]+/);
+    if (!tokenMatch) continue;
+    const token = tokenMatch[0].toUpperCase();
+    if (token === 'BETWEEN') {
+      pendingBetween += 1;
+    } else if (token === 'AND') {
+      if (pendingBetween > 0) {
+        pendingBetween -= 1;
+      } else {
+        return i;
+      }
+    }
+    i += tokenMatch[0].length - 1;
+  }
+
+  return -1;
+}
+
 function findOperatorOutside(value: string, operators: string[]): { operator: string; index: number } | null {
   let depth = 0;
   let quote: "'" | '"' | null = null;
@@ -501,7 +546,7 @@ export function evaluateExpression(
   }
 
   // 3. Logical AND
-  const andIdx = findKeywordOutside(expr, 'AND');
+  const andIdx = findLogicalAndOutside(expr);
   if (andIdx >= 0) {
     const left = evaluateExpression(expr.slice(0, andIdx), row, outerRow, engineState, groupRows);
     const right = evaluateExpression(expr.slice(andIdx + 3), row, outerRow, engineState, groupRows);
