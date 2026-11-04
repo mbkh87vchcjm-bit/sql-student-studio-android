@@ -447,6 +447,32 @@ INSERT INTO Products (Id, Price, Quantity) VALUES
   assert.deepStrictEqual(nullable.result.errors, []);
 });
 
+test('CHECK constraints preserve SQL three-valued logic for AND and OR', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE CheckNullLogicDB;
+USE CheckNullLogicDB;
+CREATE TABLE NullLogic (
+  Id INT PRIMARY KEY,
+  Price INT NULL,
+  Bonus INT NULL,
+  CONSTRAINT CK_NullLogic_And CHECK (Price >= 0 AND Bonus IS NULL),
+  CONSTRAINT CK_NullLogic_Or CHECK (Price >= 0 OR Bonus >= 1)
+);
+INSERT INTO NullLogic (Id, Price, Bonus) VALUES (1, NULL, NULL);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.databases.checknulllogicdb.tables.nulllogic.rows.length, 1);
+
+  const invalid = executeScript(
+    created.state,
+    'INSERT INTO NullLogic (Id, Price, Bonus) VALUES (2, -1, 0);'
+  );
+  assert.ok(invalid.result.errors.length > 0);
+  assert.match(invalid.result.errors[0], /قيد CHECK/);
+  assert.strictEqual(invalid.state.databases.checknulllogicdb.tables.nulllogic.rows.length, 1);
+});
+
 test('ALTER TABLE ADD CHECK validates existing data and DROP CONSTRAINT removes it', () => {
   const created = executeScript(
     EMPTY_STATE,
