@@ -537,20 +537,28 @@ export function evaluateExpression(
     return parseValue(subRes.rows[0][0]);
   }
 
-  // 2. Logical OR
+  // 2. Logical OR (SQL three-valued logic)
   const orIdx = findKeywordOutside(expr, 'OR');
   if (orIdx >= 0) {
     const left = evaluateExpression(expr.slice(0, orIdx), row, outerRow, engineState, groupRows);
     const right = evaluateExpression(expr.slice(orIdx + 2), row, outerRow, engineState, groupRows);
-    return Boolean(left) || Boolean(right);
+    const leftTruth = left === null ? null : Boolean(left);
+    const rightTruth = right === null ? null : Boolean(right);
+    if (leftTruth === true || rightTruth === true) return true;
+    if (leftTruth === null || rightTruth === null) return null;
+    return false;
   }
 
-  // 3. Logical AND
+  // 3. Logical AND (SQL three-valued logic)
   const andIdx = findLogicalAndOutside(expr);
   if (andIdx >= 0) {
     const left = evaluateExpression(expr.slice(0, andIdx), row, outerRow, engineState, groupRows);
     const right = evaluateExpression(expr.slice(andIdx + 3), row, outerRow, engineState, groupRows);
-    return Boolean(left) && Boolean(right);
+    const leftTruth = left === null ? null : Boolean(left);
+    const rightTruth = right === null ? null : Boolean(right);
+    if (leftTruth === false || rightTruth === false) return false;
+    if (leftTruth === null || rightTruth === null) return null;
+    return true;
   }
 
   // 4. Logical NOT
