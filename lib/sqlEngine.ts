@@ -18,6 +18,11 @@ export interface ForeignKeyModel {
   referencedColumn: string;
 }
 
+export interface CheckConstraintModel {
+  name: string;
+  expression: string;
+}
+
 export interface TableModel {
   name: string;
   columns: ColumnModel[];
@@ -28,6 +33,8 @@ export interface TableModel {
   uniqueConstraints?: string[][];
   /** Optional so databases saved by older app versions remain readable. */
   foreignKeys?: ForeignKeyModel[];
+  /** Optional SQL CHECK constraints stored as expressions. */
+  checkConstraints?: CheckConstraintModel[];
 }
 
 export interface DatabaseModel {
@@ -1735,6 +1742,33 @@ function validateReferencedRows(database: DatabaseModel, parentTable: TableModel
   return null;
 }
 
+function checkExpressionReferencesColumn(expression: string, columnName: string): boolean {
+  const escaped = columnName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp('(^|[^A-Za-z0-9_])\\[?' + escaped + '\\]?(?=$|[^A-Za-z0-9_])', 'i');
+  return pattern.test(expression);
+}
+
+function validateCheckConstraints(
+  table: TableModel,
+  rows: StoredRow[],
+  engineState: EngineState
+): string | null {
+  for (const constraint of table.checkConstraints ?? []) {
+    for (const row of rows) {
+      try {
+        const value = evaluateExpression(constraint.expression, row, undefined, engineState);
+        // SQL CHECK accepts TRUE and UNKNOWN (NULL); only FALSE violates it.
+        if (value === false || value === 0) {
+          return 'فشل قيد CHECK "' + constraint.name + '"؛ التعبير "' + constraint.expression + '" غير محقق.';
+        }
+      } catch (error) {
+        return 'تعذر تقييم قيد CHECK "' + constraint.name + '": ' + (error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+  return null;
+}
+
 function executeStatement(state: EngineState, statement: string): ExecutionResult {
   const start = Date.now();
   const sql = statement.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '').trim();
@@ -1785,7 +1819,16 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     let tablePrimaryKeys: string[] = [];
     const tableUniqueConstraints: string[][] = [];
     const tableForeignKeys: ForeignKeyModel[] = [];
+    const tableCheckConstraints: CheckConstraintModel[] = [];
     for (const definition of definitions) {
+      const tableCheck = definition.match(/^(?:CONSTRAINT\\s+([\\[\\]\\w-]+)\\s+)?CHECK\\s*\\(([\\s\\S]*)\\)$/i);
+      if (tableCheck) {
+        tableCheckConstraints.push({
+          name: cleanName(tableCheck[1] ?? ('CK_' + name + '_' + (tableCheckConstraints.length + 1))),
+          expression: tableCheck[2].trim(),
+        });
+        continue;
+      }
       const foreignKeyMatch = definition.match(/^(?:CONSTRAINT\s+([\[\]\w-]+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+([\[\]\w.-]+)\s*\(([^)]+)\)$/i);
       if (foreignKeyMatch) {
         const sourceColumns = splitTopLevel(foreignKeyMatch[2]).map(cleanName);
@@ -1815,7 +1858,14 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       const columnMatch = definition.match(/^([[\]\w-]+)\s+([A-Z]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)([\s\S]*)$/i);
       if (!columnMatch) return errorResult(state, start, `تعريف العمود غير مفهوم: ${definition}`);
       const rest = columnMatch[3] ?? '';
-      const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|$)/i);
+      const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|\s+CHECK\b|$)/i);
+      const inlineCheck = rest.match(/\bCHECK\s*\(([\s\S]*)\)\s*$/i);
+      if (inlineCheck) {
+        tableCheckConstraints.push({
+          name: 'CK_' + name + '_' + cleanName(columnMatch[1]),
+          expression: inlineCheck[1].trim(),
+        });
+      }
       const inlineReference = rest.match(/\bREFERENCES\s+([\[\]\w.-]+)\s*\(\s*([\[\]\w-]+)\s*\)/i);
       if (inlineReference) {
         tableForeignKeys.push({
@@ -1866,7 +1916,16 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       ...(primaryKeyColumns.length ? { primaryKeyColumns } : {}),
       ...(tableUniqueConstraints.length ? { uniqueConstraints: tableUniqueConstraints } : {}),
       ...(tableForeignKeys.length ? { foreignKeys: tableForeignKeys } : {}),
+      ...(tableCheckConstraints.length ? { checkConstraints: tableCheckConstraints } : {}),
     };
+    const constraintNames = new Set<string>();
+    for (const constraint of [...tableCheckConstraints, ...tableForeignKeys]) {
+      const normalizedName = keyOf(constraint.name);
+      if (constraintNames.has(normalizedName)) {
+        return errorResult(state, start, 'اسم القيد "' + constraint.name + '" مكرر في الجدول.');
+      }
+      constraintNames.add(normalizedName);
+    }
     const foreignKeyNames = new Set<string>();
     for (const foreignKey of tableForeignKeys) {
       const normalizedName = keyOf(foreignKey.name);
@@ -1929,6 +1988,30 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: ['تمت إضافة قيد FOREIGN KEY "' + foreignKey.name + '".'] });
   }
 
+  // ALTER TABLE ADD CHECK CONSTRAINT
+  match = sql.match(/^ALTER\\s+TABLE\\s+([\\[\\]\\w.-]+)\\s+ADD\\s+(?:CONSTRAINT\\s+([\\[\\]\\w-]+)\\s+)?CHECK\\s*\\(([\\s\\S]*)\\)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const checkConstraints = table.checkConstraints ?? [];
+    const foreignKeys = table.foreignKeys ?? [];
+    const checkName = cleanName(match[2] ?? ('CK_' + tableName + '_' + (checkConstraints.length + 1)));
+    if (checkConstraints.some((item) => keyOf(item.name) === keyOf(checkName))
+      || foreignKeys.some((item) => keyOf(item.name) === keyOf(checkName))) {
+      return errorResult(state, start, 'اسم القيد "' + checkName + '" موجود بالفعل في الجدول.');
+    }
+    const constraint: CheckConstraintModel = { name: checkName, expression: match[3].trim() };
+    const candidateTable: TableModel = {
+      ...table,
+      checkConstraints: [...checkConstraints, constraint],
+    };
+    const checkError = validateCheckConstraints(candidateTable, table.rows, state);
+    if (checkError) return errorResult(state, start, checkError);
+    table.checkConstraints = candidateTable.checkConstraints;
+    return success(state, start, { messages: ['تمت إضافة قيد CHECK "' + checkName + '".'] });
+  }
+
   // ALTER TABLE DROP CONSTRAINT (FOREIGN KEY)
   match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+DROP\s+CONSTRAINT\s+([\[\]\w-]+)$/i);
   if (match) {
@@ -1938,12 +2021,19 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const constraintName = cleanName(match[2]);
     const foreignKeys = table.foreignKeys ?? [];
     const foreignKeyIndex = foreignKeys.findIndex((item) => keyOf(item.name) === keyOf(constraintName));
-    if (foreignKeyIndex < 0) {
-      return errorResult(state, start, 'قيد FOREIGN KEY "' + constraintName + '" غير موجود في الجدول "' + tableName + '". يدعم DROP CONSTRAINT حاليًا إزالة قيود FOREIGN KEY فقط.');
+    if (foreignKeyIndex >= 0) {
+      table.foreignKeys = foreignKeys.filter((_, index) => index !== foreignKeyIndex);
+      if (table.foreignKeys.length === 0) delete table.foreignKeys;
+      return success(state, start, { messages: ['تم حذف قيد FOREIGN KEY "' + constraintName + '" من الجدول "' + tableName + '".'] });
     }
-    table.foreignKeys = foreignKeys.filter((_, index) => index !== foreignKeyIndex);
-    if (table.foreignKeys.length === 0) delete table.foreignKeys;
-    return success(state, start, { messages: ['تم حذف قيد FOREIGN KEY "' + constraintName + '" من الجدول "' + tableName + '".'] });
+    const checkConstraints = table.checkConstraints ?? [];
+    const checkIndex = checkConstraints.findIndex((item) => keyOf(item.name) === keyOf(constraintName));
+    if (checkIndex >= 0) {
+      table.checkConstraints = checkConstraints.filter((_, index) => index !== checkIndex);
+      if (table.checkConstraints.length === 0) delete table.checkConstraints;
+      return success(state, start, { messages: ['تم حذف قيد CHECK "' + constraintName + '" من الجدول "' + tableName + '".'] });
+    }
+    return errorResult(state, start, 'القيد "' + constraintName + '" غير موجود في الجدول "' + tableName + '". يدعم DROP CONSTRAINT حاليًا قيود FOREIGN KEY وCHECK.');
   }
 
   // 6. ALTER TABLE ADD COLUMN
@@ -1976,8 +2066,11 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     } catch (error) {
       return errorResult(state, start, error instanceof Error ? error.message : String(error));
     }
-    const validationError = validateTableRows({ ...table, columns: [...table.columns, newColumn] }, candidateRows);
+    const candidateTable: TableModel = { ...table, columns: [...table.columns, newColumn] };
+    const validationError = validateTableRows(candidateTable, candidateRows);
     if (validationError) return errorResult(state, start, validationError);
+    const checkError = validateCheckConstraints(candidateTable, candidateRows, state);
+    if (checkError) return errorResult(state, start, checkError);
     table.columns.push(newColumn);
     table.rows = candidateRows;
     return success(state, start, { messages: ['تمت إضافة العمود "' + columnName + '" إلى الجدول "' + tableName + '".'] });
@@ -2011,8 +2104,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     } catch (error) {
       return errorResult(state, start, error instanceof Error ? error.message : String(error));
     }
-    const validationError = validateTableRows({ ...table, columns: table.columns.map((column, index) => index === columnIndex ? updatedColumn : column) }, candidateRows);
+    const candidateTable: TableModel = { ...table, columns: table.columns.map((column, index) => index === columnIndex ? updatedColumn : column) };
+    const validationError = validateTableRows(candidateTable, candidateRows);
     if (validationError) return errorResult(state, start, validationError);
+    const checkError = validateCheckConstraints(candidateTable, candidateRows, state);
+    if (checkError) return errorResult(state, start, checkError);
+    const foreignKeyError = validateForeignKeyRows(database, candidateTable, candidateRows);
+    if (foreignKeyError) return errorResult(state, start, foreignKeyError);
+    const referenceError = validateReferencedRows(database, table, candidateRows);
+    if (referenceError) return errorResult(state, start, referenceError);
     table.columns[columnIndex] = updatedColumn;
     table.rows = candidateRows;
     return success(state, start, { messages: ['تم تعديل تعريف العمود "' + columnName + '" في الجدول "' + tableName + '".'] });
@@ -2039,7 +2139,10 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
         && keyOf(foreignKey.referencedColumn) === keyOf(columnName)
       )
     );
-    if (column.primaryKey || column.unique || belongsToUniqueConstraint || belongsToForeignKey) {
+    const belongsToCheck = (table.checkConstraints ?? []).some((constraint) =>
+      checkExpressionReferencesColumn(constraint.expression, columnName)
+    );
+    if (column.primaryKey || column.unique || belongsToUniqueConstraint || belongsToForeignKey || belongsToCheck) {
       return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه يحمل قيد PRIMARY KEY أو UNIQUE. احذف القيد أولًا.');
     }
     table.columns.splice(columnIndex, 1);
@@ -2108,6 +2211,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (validationError) return errorResult(state, start, validationError);
     const foreignKeyError = validateForeignKeyRows(database, table, candidateRows);
     if (foreignKeyError) return errorResult(state, start, foreignKeyError);
+    const checkError = validateCheckConstraints(table, candidateRows, state);
+    if (checkError) return errorResult(state, start, checkError);
     table.rows.push(...pendingRows);
     const inserted = pendingRows.length;
     return success(state, start, { affectedRows: inserted, messages: [`(${inserted} rows affected)`] });
@@ -2170,6 +2275,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (foreignKeyError) return errorResult(state, start, foreignKeyError);
     const referenceError = validateReferencedRows(database, table, candidateRows);
     if (referenceError) return errorResult(state, start, referenceError);
+    const checkError = validateCheckConstraints(table, candidateRows, state);
+    if (checkError) return errorResult(state, start, checkError);
 
     table.rows = candidateRows;
     return success(state, start, { affectedRows: modifiedCount, messages: [`(${modifiedCount} rows affected)`] });
