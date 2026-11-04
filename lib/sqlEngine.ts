@@ -59,6 +59,8 @@ export interface ViewModel {
   name: string;
   /** The SELECT definition is re-evaluated whenever the view is queried. */
   definition: string;
+  /** Cached output column names for INFORMATION_SCHEMA metadata. */
+  columns?: string[];
 }
 
 export interface DatabaseModel {
@@ -1054,6 +1056,198 @@ function evaluateBuiltInFunction(
    JOIN & SOURCE TABLE RESOLUTION
    ========================================================================== */
 
+interface VirtualCatalogData {
+  columns: string[];
+  rows: StoredRow[];
+}
+
+/**
+ * Educational subset of SQL Server INFORMATION_SCHEMA.
+ * All user objects currently live in the simulated dbo schema.
+ */
+function informationSchemaData(sourceName: string, database: DatabaseModel): VirtualCatalogData | null {
+  const objectName = keyOf(sourceName);
+  const tables = Object.values(database.tables);
+  const views = Object.values(database.views ?? {});
+  const allObjectNames = [
+    ...tables.map((table) => ({ name: table.name, type: 'BASE TABLE' })),
+    ...views.map((view) => ({ name: view.name, type: 'VIEW' })),
+  ];
+
+  if (objectName === 'information_schema.tables') {
+    const columns = ['TABLE_CATALOG', 'TABLE_SCHEMA', 'TABLE_NAME', 'TABLE_TYPE'];
+    return {
+      columns,
+      rows: allObjectNames.map((item) => ({
+        TABLE_CATALOG: database.name,
+        TABLE_SCHEMA: 'dbo',
+        TABLE_NAME: item.name,
+        TABLE_TYPE: item.type,
+      })),
+    };
+  }
+
+  if (objectName === 'information_schema.columns') {
+    const columns = [
+      'TABLE_CATALOG',
+      'TABLE_SCHEMA',
+      'TABLE_NAME',
+      'COLUMN_NAME',
+      'ORDINAL_POSITION',
+      'COLUMN_DEFAULT',
+      'IS_NULLABLE',
+      'DATA_TYPE',
+      'CHARACTER_MAXIMUM_LENGTH',
+      'NUMERIC_PRECISION',
+      'NUMERIC_SCALE',
+    ];
+    const rows: StoredRow[] = [];
+
+    for (const table of tables) {
+      table.columns.forEach((column, index) => {
+        const normalizedType = column.type.toUpperCase();
+        const baseType = normalizedType.match(/^[A-Z]+/)?.[0] ?? normalizedType;
+        const args = normalizedType.match(/\(([^)]+)\)/)?.[1];
+        const typeArgs = args ? args.split(',').map((part) => part.trim()) : [];
+        let characterLength: SqlValue = null;
+        let numericPrecision: SqlValue = null;
+        let numericScale: SqlValue = null;
+
+        if (['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'BINARY', 'VARBINARY'].includes(baseType) && typeArgs.length) {
+          characterLength = typeArgs[0].toUpperCase() === 'MAX' ? -1 : Number.parseInt(typeArgs[0], 10);
+        }
+        if (['DECIMAL', 'NUMERIC'].includes(baseType)) {
+          numericPrecision = typeArgs[0] ? Number.parseInt(typeArgs[0], 10) : 18;
+          numericScale = typeArgs[1] ? Number.parseInt(typeArgs[1], 10) : 0;
+        } else if (baseType === 'TINYINT') {
+          numericPrecision = 3;
+          numericScale = 0;
+        } else if (baseType === 'SMALLINT') {
+          numericPrecision = 5;
+          numericScale = 0;
+        } else if (baseType === 'INT') {
+          numericPrecision = 10;
+          numericScale = 0;
+        } else if (baseType === 'BIGINT') {
+          numericPrecision = 19;
+          numericScale = 0;
+        }
+
+        rows.push({
+          TABLE_CATALOG: database.name,
+          TABLE_SCHEMA: 'dbo',
+          TABLE_NAME: table.name,
+          COLUMN_NAME: column.name,
+          ORDINAL_POSITION: index + 1,
+          COLUMN_DEFAULT: column.defaultValue === undefined ? null : valueToText(column.defaultValue),
+          IS_NULLABLE: column.nullable ? 'YES' : 'NO',
+          DATA_TYPE: baseType,
+          CHARACTER_MAXIMUM_LENGTH: characterLength,
+          NUMERIC_PRECISION: numericPrecision,
+          NUMERIC_SCALE: numericScale,
+        });
+      });
+    }
+
+    for (const view of views) {
+      (view.columns ?? []).forEach((columnName, index) => {
+        rows.push({
+          TABLE_CATALOG: database.name,
+          TABLE_SCHEMA: 'dbo',
+          TABLE_NAME: view.name,
+          COLUMN_NAME: columnName,
+          ORDINAL_POSITION: index + 1,
+          COLUMN_DEFAULT: null,
+          IS_NULLABLE: 'YES',
+          DATA_TYPE: null,
+          CHARACTER_MAXIMUM_LENGTH: null,
+          NUMERIC_PRECISION: null,
+          NUMERIC_SCALE: null,
+        });
+      });
+    }
+
+    return { columns, rows };
+  }
+
+  if (objectName === 'information_schema.table_constraints') {
+    const columns = [
+      'CONSTRAINT_CATALOG',
+      'CONSTRAINT_SCHEMA',
+      'CONSTRAINT_NAME',
+      'TABLE_CATALOG',
+      'TABLE_SCHEMA',
+      'TABLE_NAME',
+      'CONSTRAINT_TYPE',
+      'IS_DEFERRABLE',
+      'INITIALLY_DEFERRED',
+    ];
+    const rows: StoredRow[] = [];
+    const addConstraint = (tableName: string, constraintName: string, constraintType: string) => {
+      rows.push({
+        CONSTRAINT_CATALOG: database.name,
+        CONSTRAINT_SCHEMA: 'dbo',
+        CONSTRAINT_NAME: constraintName,
+        TABLE_CATALOG: database.name,
+        TABLE_SCHEMA: 'dbo',
+        TABLE_NAME: tableName,
+        CONSTRAINT_TYPE: constraintType,
+        IS_DEFERRABLE: 'NO',
+        INITIALLY_DEFERRED: 'NO',
+      });
+    };
+
+    for (const table of tables) {
+      const primaryKeys = table.primaryKeyColumns?.length
+        ? table.primaryKeyColumns
+        : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      if (primaryKeys.length) addConstraint(table.name, 'PK_' + table.name, 'PRIMARY KEY');
+
+      (table.uniqueConstraints ?? []).forEach((constraint, index) => {
+        addConstraint(table.name, 'UQ_' + table.name + '_' + (index + 1), 'UNIQUE');
+      });
+      for (const column of table.columns.filter((item) => item.unique)) {
+        addConstraint(table.name, 'UQ_' + table.name + '_' + column.name, 'UNIQUE');
+      }
+      for (const foreignKey of table.foreignKeys ?? []) {
+        addConstraint(table.name, foreignKey.name, 'FOREIGN KEY');
+      }
+      for (const check of table.checkConstraints ?? []) {
+        addConstraint(table.name, check.name, 'CHECK');
+      }
+      for (const column of table.columns.filter((item) => item.defaultConstraintName)) {
+        addConstraint(table.name, column.defaultConstraintName!, 'DEFAULT');
+      }
+    }
+
+    return { columns, rows };
+  }
+
+  if (objectName === 'information_schema.views') {
+    const columns = [
+      'TABLE_CATALOG',
+      'TABLE_SCHEMA',
+      'TABLE_NAME',
+      'VIEW_DEFINITION',
+      'CHECK_OPTION',
+      'IS_UPDATABLE',
+    ];
+    return {
+      columns,
+      rows: views.map((view) => ({
+        TABLE_CATALOG: database.name,
+        TABLE_SCHEMA: 'dbo',
+        TABLE_NAME: view.name,
+        VIEW_DEFINITION: view.definition,
+        CHECK_OPTION: 'NONE',
+        IS_UPDATABLE: 'NO',
+      })),
+    };
+  }
+
+  return null;
+}
+
 interface ParsedTableSource {
   alias: string;
   tableName: string;
@@ -1101,6 +1295,22 @@ function parseTableSource(
   const tableName = cleanName(parts[0]);
   const alias = cleanName(parts[1] || parts[0]);
   const sourceId = `tbl_${sourceIndex}_${alias}`;
+
+  const catalogData = informationSchemaData(tableName, database);
+  if (catalogData) {
+    const rows: StoredRow[] = catalogData.rows.map((record) => {
+      const obj: StoredRow = {};
+      for (const columnName of catalogData.columns) {
+        const value = record[columnName] ?? null;
+        obj[tableName + '.' + columnName] = value;
+        obj[alias + '.' + columnName] = value;
+        obj[sourceId + '::' + columnName] = value;
+        obj[columnName] = value;
+      }
+      return obj;
+    });
+    return { alias, tableName, sourceId, columns: catalogData.columns, rows };
+  }
 
   const table = tableFor(database, tableName);
   if (!table) {
@@ -1938,7 +2148,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     );
     if (duplicateColumns.length) return errorResult(state, start, `أسماء أعمدة العرض يجب أن تكون فريدة؛ الاسم المكرر: "${duplicateColumns[0]}".`);
     database.views ??= {};
-    database.views[viewKey] = { name: viewName, definition };
+    database.views[viewKey] = { name: viewName, definition, columns: validation.columns };
     return success(state, start, { messages: [`تم إنشاء العرض "${viewName}" بنجاح. يعاد تنفيذ تعريفه عند كل SELECT.`] });
   }
 
@@ -1972,6 +2182,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       view.definition = previousDefinition;
       return errorResult(state, start, `أسماء أعمدة العرض يجب أن تكون فريدة؛ الاسم المكرر: "${duplicateColumns[0]}".`);
     }
+    view.columns = validation.columns;
     return success(state, start, { messages: [`تم تعديل تعريف العرض "${viewName}".`] });
   }
 

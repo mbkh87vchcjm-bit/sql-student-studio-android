@@ -904,3 +904,58 @@ test('ALTER VIEW rejects circular view dependencies and preserves the previous d
   assert.deepStrictEqual(stillValid.result.errors, []);
   assert.deepStrictEqual(stillValid.result.rows, [['1', 'Opening'], ['2', 'Deposit']]);
 });
+
+
+/* ==========================================================================
+   INFORMATION_SCHEMA: educational database metadata
+   ========================================================================== */
+
+test('INFORMATION_SCHEMA.TABLES lists base tables and views', () => {
+  const state = createAdminState();
+  const created = executeScript(state, 'CREATE VIEW LedgerSummary AS SELECT Id, Balance FROM Ledger;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_NAME;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [['Ledger', 'BASE TABLE'], ['LedgerSummary', 'VIEW']]);
+});
+
+test('INFORMATION_SCHEMA.COLUMNS returns ordered types, nullability and character lengths', () => {
+  const state = createAdminState();
+  const result = executeScript(state, "SELECT COLUMN_NAME, ORDINAL_POSITION, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'Ledger' ORDER BY ORDINAL_POSITION;");
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['Id', '1', 'INT', 'NO', 'NULL'],
+    ['Name', '2', 'NVARCHAR', 'NO', '20'],
+    ['Balance', '3', 'DECIMAL', 'NO', 'NULL'],
+  ]);
+});
+
+test('INFORMATION_SCHEMA.TABLE_CONSTRAINTS describes primary and named default constraints', () => {
+  const created = executeScript(EMPTY_STATE, "CREATE DATABASE CatalogDB; USE CatalogDB; CREATE TABLE Accounts (Id INT PRIMARY KEY, Status NVARCHAR(12) CONSTRAINT DF_Accounts_Status DEFAULT 'Open');");
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT CONSTRAINT_NAME, CONSTRAINT_TYPE, TABLE_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS ORDER BY CONSTRAINT_TYPE;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['DF_Accounts_Status', 'DEFAULT', 'Accounts'],
+    ['PK_Accounts', 'PRIMARY KEY', 'Accounts'],
+  ]);
+});
+
+test('INFORMATION_SCHEMA.VIEWS exposes definitions and view output columns', () => {
+  const state = createAdminState();
+  const created = executeScript(state, 'CREATE VIEW LedgerSummary AS SELECT Id AS EntryId, Balance FROM Ledger;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const views = executeScript(created.state, 'SELECT TABLE_NAME, VIEW_DEFINITION, IS_UPDATABLE FROM INFORMATION_SCHEMA.VIEWS;');
+  assert.deepStrictEqual(views.result.errors, []);
+  assert.deepStrictEqual(views.result.rows, [['LedgerSummary', 'SELECT Id AS EntryId, Balance FROM Ledger', 'NO']]);
+  const columns = executeScript(created.state, "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'LedgerSummary' ORDER BY ORDINAL_POSITION;");
+  assert.deepStrictEqual(columns.result.errors, []);
+  assert.deepStrictEqual(columns.result.rows, [['EntryId'], ['Balance']]);
+});
+
+test('INFORMATION_SCHEMA metadata supports qualified JOINs and filters', () => {
+  const state = createAdminState();
+  const result = executeScript(state, "SELECT t.TABLE_NAME, c.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLES AS t INNER JOIN INFORMATION_SCHEMA.COLUMNS AS c ON t.TABLE_NAME = c.TABLE_NAME WHERE t.TABLE_TYPE = 'BASE TABLE' AND t.TABLE_NAME = 'Ledger' ORDER BY c.ORDINAL_POSITION;");
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [['Ledger', 'Id'], ['Ledger', 'Name'], ['Ledger', 'Balance']]);
+});
