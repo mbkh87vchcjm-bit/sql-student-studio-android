@@ -1923,14 +1923,14 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   if (!database) return errorResult(state, start, 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.');
 
   // CREATE / ALTER VIEW: persist a validated SELECT definition, not a snapshot of rows.
-  match = sql.match(/^CREATE\\s+VIEW\\s+([\\[\\]\\w.-]+)\\s+AS\\s+([\\s\\S]+)$/i);
+  match = sql.match(/^CREATE\s+VIEW\s+([\[\]\w.-]+)\s+AS\s+([\s\S]+)$/i);
   if (match) {
     const viewName = cleanName(match[1]);
     const viewKey = keyOf(viewName);
     if (tableFor(database, viewName)) return errorResult(state, start, `لا يمكن إنشاء العرض "${viewName}" لأن الاسم مستخدم لجدول.`);
     if (database.views?.[viewKey]) return errorResult(state, start, `العرض "${viewName}" موجود بالفعل.`);
     const definition = match[2].trim();
-    if (!/^SELECT\\b/i.test(definition)) return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
+    if (!/^SELECT\b/i.test(definition)) return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
     const validation = executeQueryWithSetOperators(definition, state);
     if (validation.error) return errorResult(state, start, `تعريف VIEW غير صالح: ${validation.error}`);
     const duplicateColumns = validation.columns.filter((column, index) =>
@@ -1942,14 +1942,14 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: [`تم إنشاء العرض "${viewName}" بنجاح. يعاد تنفيذ تعريفه عند كل SELECT.`] });
   }
 
-  match = sql.match(/^ALTER\\s+VIEW\\s+([\\[\\]\\w.-]+)\\s+AS\\s+([\\s\\S]+)$/i);
+  match = sql.match(/^ALTER\s+VIEW\s+([\[\]\w.-]+)\s+AS\s+([\s\S]+)$/i);
   if (match) {
     const viewName = cleanName(match[1]);
     const viewKey = keyOf(viewName);
     const view = database.views?.[viewKey];
     if (!view) return errorResult(state, start, `العرض "${viewName}" غير موجود.`);
     const definition = match[2].trim();
-    if (!/^SELECT\\b/i.test(definition)) return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
+    if (!/^SELECT\b/i.test(definition)) return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
     const validation = executeQueryWithSetOperators(definition, state);
     if (validation.error) return errorResult(state, start, `تعريف VIEW غير صالح: ${validation.error}`);
     const duplicateColumns = validation.columns.filter((column, index) =>
@@ -1960,7 +1960,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: [`تم تعديل تعريف العرض "${viewName}".`] });
   }
 
-  match = sql.match(/^DROP\\s+VIEW\\s+(IF\\s+EXISTS\\s+)?([\\[\\]\\w.-]+)$/i);
+  match = sql.match(/^DROP\s+VIEW\s+(IF\s+EXISTS\s+)?([\[\]\w.-]+)$/i);
   if (match) {
     const viewName = cleanName(match[2]);
     const viewKey = keyOf(viewName);
