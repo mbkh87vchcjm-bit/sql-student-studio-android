@@ -11,6 +11,13 @@ export interface ColumnModel {
 
 export type StoredRow = Record<string, SqlValue>;
 
+export interface ForeignKeyModel {
+  name: string;
+  column: string;
+  referencedTable: string;
+  referencedColumn: string;
+}
+
 export interface TableModel {
   name: string;
   columns: ColumnModel[];
@@ -19,6 +26,8 @@ export interface TableModel {
   primaryKeyColumns?: string[];
   /** Table-level UNIQUE constraints; each item contains the constrained columns. */
   uniqueConstraints?: string[][];
+  /** Optional so databases saved by older app versions remain readable. */
+  foreignKeys?: ForeignKeyModel[];
 }
 
 export interface DatabaseModel {
@@ -1602,6 +1611,110 @@ function validateTableRows(table: TableModel, rows: StoredRow[]): string | null 
 
   return null;
 }
+function sameSqlValue(left: SqlValue, right: SqlValue): boolean {
+  if (left === null || right === null) return left === right;
+  if (typeof left === "string" && typeof right === "string") {
+    return left.toLocaleLowerCase() === right.toLocaleLowerCase();
+  }
+  return left === right;
+}
+
+function validateForeignKeyDefinition(
+  database: DatabaseModel,
+  sourceTable: TableModel,
+  foreignKey: ForeignKeyModel
+): string | null {
+  const sourceColumn = sourceTable.columns.find((column) => keyOf(column.name) === keyOf(foreignKey.column));
+  if (!sourceColumn) {
+    return 'عمود المفتاح الخارجي "' + foreignKey.column + '" غير موجود في الجدول "' + sourceTable.name + '".';
+  }
+
+  const referencedTable = keyOf(foreignKey.referencedTable) === keyOf(sourceTable.name)
+    ? sourceTable
+    : tableFor(database, foreignKey.referencedTable);
+  if (!referencedTable) {
+    return 'الجدول المشار إليه "' + foreignKey.referencedTable + '" غير موجود في قاعدة البيانات الحالية.';
+  }
+
+  const referencedColumn = referencedTable.columns.find((column) => keyOf(column.name) === keyOf(foreignKey.referencedColumn));
+  if (!referencedColumn) {
+    return 'العمود المشار إليه "' + foreignKey.referencedColumn + '" غير موجود في الجدول "' + referencedTable.name + '".';
+  }
+
+  const primaryKeyColumns = referencedTable.primaryKeyColumns?.length
+    ? referencedTable.primaryKeyColumns
+    : referencedTable.columns.filter((column) => column.primaryKey).map((column) => column.name);
+  const isSingleColumnPrimaryKey = primaryKeyColumns.length === 1
+    && keyOf(primaryKeyColumns[0]) === keyOf(referencedColumn.name);
+  const isSingleColumnUnique = referencedColumn.unique
+    || (referencedTable.uniqueConstraints ?? []).some((columns) =>
+      columns.length === 1 && keyOf(columns[0]) === keyOf(referencedColumn.name)
+    );
+
+  if (!isSingleColumnPrimaryKey && !isSingleColumnUnique) {
+    return 'يجب أن يشير المفتاح الخارجي إلى عمود يحمل PRIMARY KEY أو UNIQUE منفردًا.';
+  }
+
+  return null;
+}
+
+function validateForeignKeyRows(database: DatabaseModel, table: TableModel, rows: StoredRow[]): string | null {
+  for (const foreignKey of table.foreignKeys ?? []) {
+    const definitionError = validateForeignKeyDefinition(database, table, foreignKey);
+    if (definitionError) return definitionError;
+
+    const parentTable = keyOf(foreignKey.referencedTable) === keyOf(table.name)
+      ? table
+      : tableFor(database, foreignKey.referencedTable);
+    if (!parentTable) return 'الجدول المشار إليه "' + foreignKey.referencedTable + '" غير موجود.';
+
+    const sourceColumn = table.columns.find((column) => keyOf(column.name) === keyOf(foreignKey.column));
+    const parentColumn = parentTable.columns.find((column) => keyOf(column.name) === keyOf(foreignKey.referencedColumn));
+    if (!sourceColumn || !parentColumn) return 'تعريف المفتاح الخارجي "' + foreignKey.name + '" غير مكتمل.';
+
+    for (const row of rows) {
+      const value = row[sourceColumn.name] ?? null;
+      if (value === null) continue;
+      const exists = parentTable.rows.some((parentRow) =>
+        sameSqlValue(parentRow[parentColumn.name] ?? null, value)
+      );
+      if (!exists) {
+        return 'القيمة في العمود "' + sourceColumn.name + '" لا تطابق أي قيمة في الجدول "' + parentTable.name + '"؛ القيد "' + foreignKey.name + '" يمنع الإدخال أو التعديل.';
+      }
+    }
+  }
+
+  return null;
+}
+
+function validateReferencedRows(database: DatabaseModel, parentTable: TableModel, candidateRows: StoredRow[]): string | null {
+  for (const childTable of Object.values(database.tables)) {
+    for (const foreignKey of childTable.foreignKeys ?? []) {
+      if (keyOf(foreignKey.referencedTable) !== keyOf(parentTable.name)) continue;
+
+      const parentColumn = parentTable.columns.find((column) => keyOf(column.name) === keyOf(foreignKey.referencedColumn));
+      const childColumn = childTable.columns.find((column) => keyOf(column.name) === keyOf(foreignKey.column));
+      if (!parentColumn || !childColumn) continue;
+
+      const childRows = keyOf(childTable.name) === keyOf(parentTable.name)
+        ? candidateRows
+        : childTable.rows;
+      for (const childRow of childRows) {
+        const childValue = childRow[childColumn.name] ?? null;
+        if (childValue === null) continue;
+        const stillExists = candidateRows.some((parentRow) =>
+          sameSqlValue(parentRow[parentColumn.name] ?? null, childValue)
+        );
+        if (!stillExists) {
+          return 'لا يمكن حذف أو تعديل القيمة المشار إليها في الجدول "' + parentTable.name + '"؛ توجد سجلات مرتبطة بالقيد الخارجي "' + foreignKey.name + '".';
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 function executeStatement(state: EngineState, statement: string): ExecutionResult {
   const start = Date.now();
   const sql = statement.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '').trim();
@@ -1651,7 +1764,23 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const columns: ColumnModel[] = [];
     let tablePrimaryKeys: string[] = [];
     const tableUniqueConstraints: string[][] = [];
+    const tableForeignKeys: ForeignKeyModel[] = [];
     for (const definition of definitions) {
+      const foreignKeyMatch = definition.match(/^(?:CONSTRAINT\s+([\[\]\w-]+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+([\[\]\w.-]+)\s*\(([^)]+)\)$/i);
+      if (foreignKeyMatch) {
+        const sourceColumns = splitTopLevel(foreignKeyMatch[2]).map(cleanName);
+        const targetColumns = splitTopLevel(foreignKeyMatch[4]).map(cleanName);
+        if (sourceColumns.length !== 1 || targetColumns.length !== 1) {
+          return errorResult(state, start, 'يدعم هذا الإصدار التعليمي المفتاح الخارجي لعمود واحد فقط في كل قيد.');
+        }
+        tableForeignKeys.push({
+          name: cleanName(foreignKeyMatch[1] ?? ('FK_' + name + '_' + sourceColumns[0])),
+          column: sourceColumns[0],
+          referencedTable: cleanName(foreignKeyMatch[3]),
+          referencedColumn: targetColumns[0],
+        });
+        continue;
+      }
       const primary = definition.match(/^(?:CONSTRAINT\s+[\[\]\w-]+\s+)?PRIMARY\s+KEY\s*\((.+)\)$/i);
       if (primary) {
         if (tablePrimaryKeys.length) return errorResult(state, start, 'لا يمكن تعريف أكثر من قيد PRIMARY KEY للجدول.');
@@ -1667,6 +1796,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       if (!columnMatch) return errorResult(state, start, `تعريف العمود غير مفهوم: ${definition}`);
       const rest = columnMatch[3] ?? '';
       const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|$)/i);
+      const inlineReference = rest.match(/\bREFERENCES\s+([\[\]\w.-]+)\s*\(\s*([\[\]\w-]+)\s*\)/i);
+      if (inlineReference) {
+        tableForeignKeys.push({
+          name: 'FK_' + name + '_' + cleanName(columnMatch[1]),
+          column: cleanName(columnMatch[1]),
+          referencedTable: cleanName(inlineReference[1]),
+          referencedColumn: cleanName(inlineReference[2]),
+        });
+      }
       columns.push({
         name: cleanName(columnMatch[1]),
         type: columnMatch[2].toUpperCase().replace(/\s+/g, ''),
@@ -1701,13 +1839,25 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const primaryKeyColumns = tablePrimaryKeys.length
       ? tablePrimaryKeys
       : columns.filter((column) => column.primaryKey).map((column) => column.name);
-    database.tables[keyOf(name)] = {
+    const newTable: TableModel = {
       name,
       columns,
       rows: [],
       ...(primaryKeyColumns.length ? { primaryKeyColumns } : {}),
       ...(tableUniqueConstraints.length ? { uniqueConstraints: tableUniqueConstraints } : {}),
+      ...(tableForeignKeys.length ? { foreignKeys: tableForeignKeys } : {}),
     };
+    const foreignKeyNames = new Set<string>();
+    for (const foreignKey of tableForeignKeys) {
+      const normalizedName = keyOf(foreignKey.name);
+      if (foreignKeyNames.has(normalizedName)) {
+        return errorResult(state, start, 'اسم قيد FOREIGN KEY "' + foreignKey.name + '" مكرر.');
+      }
+      foreignKeyNames.add(normalizedName);
+      const foreignKeyError = validateForeignKeyDefinition(database, newTable, foreignKey);
+      if (foreignKeyError) return errorResult(state, start, foreignKeyError);
+    }
+    database.tables[keyOf(name)] = newTable;
     return success(state, start, { messages: [`تم إنشاء الجدول ${name}.`] });
   }
 
@@ -1716,8 +1866,47 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   if (match) {
     const name = cleanName(match[1]);
     if (!tableFor(database, name)) return errorResult(state, start, `الجدول "${name}" غير موجود.`);
+    const dependency = Object.values(database.tables).find((childTable) =>
+      keyOf(childTable.name) !== keyOf(name)
+      && (childTable.foreignKeys ?? []).some((foreignKey) => keyOf(foreignKey.referencedTable) === keyOf(name))
+    );
+    if (dependency) {
+      return errorResult(state, start, 'لا يمكن حذف الجدول "' + name + '" لأنه مرجع في قيد FOREIGN KEY داخل الجدول "' + dependency.name + '".');
+    }
     delete database.tables[keyOf(name)];
     return success(state, start, { messages: [`تم حذف الجدول ${name}.`] });
+  }
+
+  // ALTER TABLE ADD FOREIGN KEY CONSTRAINT
+  match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+ADD\s+(?:CONSTRAINT\s+([\[\]\w-]+)\s+)?FOREIGN\s+KEY\s*\(([^)]+)\)\s+REFERENCES\s+([\[\]\w.-]+)\s*\(([^)]+)\)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const sourceColumns = splitTopLevel(match[3]).map(cleanName);
+    const targetColumns = splitTopLevel(match[5]).map(cleanName);
+    if (sourceColumns.length !== 1 || targetColumns.length !== 1) {
+      return errorResult(state, start, 'يدعم هذا الإصدار التعليمي المفتاح الخارجي لعمود واحد فقط في كل قيد.');
+    }
+    const foreignKey: ForeignKeyModel = {
+      name: cleanName(match[2] ?? ('FK_' + tableName + '_' + sourceColumns[0])),
+      column: sourceColumns[0],
+      referencedTable: cleanName(match[4]),
+      referencedColumn: targetColumns[0],
+    };
+    if ((table.foreignKeys ?? []).some((item) => keyOf(item.name) === keyOf(foreignKey.name))) {
+      return errorResult(state, start, 'قيد FOREIGN KEY "' + foreignKey.name + '" موجود بالفعل.');
+    }
+    const definitionError = validateForeignKeyDefinition(database, table, foreignKey);
+    if (definitionError) return errorResult(state, start, definitionError);
+    const candidateTable: TableModel = {
+      ...table,
+      foreignKeys: [...(table.foreignKeys ?? []), foreignKey],
+    };
+    const rowsError = validateForeignKeyRows(database, candidateTable, table.rows);
+    if (rowsError) return errorResult(state, start, rowsError);
+    table.foreignKeys = candidateTable.foreignKeys;
+    return success(state, start, { messages: ['تمت إضافة قيد FOREIGN KEY "' + foreignKey.name + '".'] });
   }
 
   // 6. ALTER TABLE ADD COLUMN
@@ -1805,7 +1994,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const belongsToUniqueConstraint = (table.uniqueConstraints ?? []).some((constraint) =>
       constraint.some((name) => keyOf(name) === keyOf(columnName))
     );
-    if (column.primaryKey || column.unique || belongsToUniqueConstraint) {
+    const belongsToForeignKey = (table.foreignKeys ?? []).some((foreignKey) =>
+      keyOf(foreignKey.column) === keyOf(columnName)
+    ) || Object.values(database.tables).some((otherTable) =>
+      (otherTable.foreignKeys ?? []).some((foreignKey) =>
+        keyOf(foreignKey.referencedTable) === keyOf(table.name)
+        && keyOf(foreignKey.referencedColumn) === keyOf(columnName)
+      )
+    );
+    if (column.primaryKey || column.unique || belongsToUniqueConstraint || belongsToForeignKey) {
       return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه يحمل قيد PRIMARY KEY أو UNIQUE. احذف القيد أولًا.');
     }
     table.columns.splice(columnIndex, 1);
@@ -1823,6 +2020,12 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const tableName = cleanName(match[1]);
     const table = tableFor(database, tableName);
     if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const dependency = Object.values(database.tables).find((childTable) =>
+      (childTable.foreignKeys ?? []).some((foreignKey) => keyOf(foreignKey.referencedTable) === keyOf(tableName))
+    );
+    if (dependency) {
+      return errorResult(state, start, 'لا يمكن تنفيذ TRUNCATE على الجدول "' + tableName + '" لأنه مرجع في قيد FOREIGN KEY داخل الجدول "' + dependency.name + '".');
+    }
     const removedRows = table.rows.length;
     table.rows = [];
     return success(state, start, { affectedRows: removedRows, messages: ['تم تفريغ الجدول "' + tableName + '" بنجاح. (' + removedRows + ' صفوف محذوفة)'] });
@@ -1863,8 +2066,11 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       pendingRows.push(row);
     }
 
-    const validationError = validateTableRows(table, [...table.rows, ...pendingRows]);
+    const candidateRows = [...table.rows, ...pendingRows];
+    const validationError = validateTableRows(table, candidateRows);
     if (validationError) return errorResult(state, start, validationError);
+    const foreignKeyError = validateForeignKeyRows(database, table, candidateRows);
+    if (foreignKeyError) return errorResult(state, start, foreignKeyError);
     table.rows.push(...pendingRows);
     const inserted = pendingRows.length;
     return success(state, start, { affectedRows: inserted, messages: [`(${inserted} rows affected)`] });
@@ -1923,6 +2129,10 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const candidateRows = updatedRows.map((item) => item.row);
     const validationError = validateTableRows(table, candidateRows);
     if (validationError) return errorResult(state, start, validationError);
+    const foreignKeyError = validateForeignKeyRows(database, table, candidateRows);
+    if (foreignKeyError) return errorResult(state, start, foreignKeyError);
+    const referenceError = validateReferencedRows(database, table, candidateRows);
+    if (referenceError) return errorResult(state, start, referenceError);
 
     table.rows = candidateRows;
     return success(state, start, { affectedRows: modifiedCount, messages: [`(${modifiedCount} rows affected)`] });
@@ -1938,7 +2148,10 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const where = match[2] ? match[2].trim() : '';
 
     const before = table.rows.length;
-    table.rows = table.rows.filter((row) => where && !Boolean(evaluateExpression(where, row, undefined, state)));
+    const candidateRows = table.rows.filter((row) => where && !Boolean(evaluateExpression(where, row, undefined, state)));
+    const referenceError = validateReferencedRows(database, table, candidateRows);
+    if (referenceError) return errorResult(state, start, referenceError);
+    table.rows = candidateRows;
     const affected = before - table.rows.length;
     return success(state, start, { affectedRows: affected, messages: [`(${affected} rows affected)`] });
   }
