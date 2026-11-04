@@ -1619,6 +1619,20 @@ function sameSqlValue(left: SqlValue, right: SqlValue): boolean {
   return left === right;
 }
 
+function areForeignKeyTypesCompatible(sourceType: string, targetType: string): boolean {
+  const normalize = (type: string) => type.toUpperCase().replace(/\s+/g, '').replace(/\(.*/, '');
+  const source = normalize(sourceType);
+  const target = normalize(targetType);
+  if (source === target) return true;
+
+  const compatibleFamilies = [
+    ['CHAR', 'NCHAR', 'VARCHAR', 'NVARCHAR'],
+    ['TINYINT', 'SMALLINT', 'INT', 'BIGINT', 'DECIMAL', 'NUMERIC', 'FLOAT', 'REAL', 'MONEY', 'SMALLMONEY'],
+    ['DATE', 'DATETIME', 'DATETIME2', 'SMALLDATETIME', 'DATETIMEOFFSET'],
+  ];
+  return compatibleFamilies.some((family) => family.includes(source) && family.includes(target));
+}
+
 function validateForeignKeyDefinition(
   database: DatabaseModel,
   sourceTable: TableModel,
@@ -1639,6 +1653,9 @@ function validateForeignKeyDefinition(
   const referencedColumn = referencedTable.columns.find((column) => keyOf(column.name) === keyOf(foreignKey.referencedColumn));
   if (!referencedColumn) {
     return 'العمود المشار إليه "' + foreignKey.referencedColumn + '" غير موجود في الجدول "' + referencedTable.name + '".';
+  }
+  if (!areForeignKeyTypesCompatible(sourceColumn.type, referencedColumn.type)) {
+    return 'نوع عمود المفتاح الخارجي "' + sourceColumn.type + '" غير متوافق مع نوع العمود المرجعي "' + referencedColumn.type + '".';
   }
 
   const primaryKeyColumns = referencedTable.primaryKeyColumns?.length
@@ -1910,6 +1927,23 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (rowsError) return errorResult(state, start, rowsError);
     table.foreignKeys = candidateTable.foreignKeys;
     return success(state, start, { messages: ['تمت إضافة قيد FOREIGN KEY "' + foreignKey.name + '".'] });
+  }
+
+  // ALTER TABLE DROP CONSTRAINT (FOREIGN KEY)
+  match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+DROP\s+CONSTRAINT\s+([\[\]\w-]+)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const constraintName = cleanName(match[2]);
+    const foreignKeys = table.foreignKeys ?? [];
+    const foreignKeyIndex = foreignKeys.findIndex((item) => keyOf(item.name) === keyOf(constraintName));
+    if (foreignKeyIndex < 0) {
+      return errorResult(state, start, 'قيد FOREIGN KEY "' + constraintName + '" غير موجود في الجدول "' + tableName + '". يدعم DROP CONSTRAINT حاليًا إزالة قيود FOREIGN KEY فقط.');
+    }
+    table.foreignKeys = foreignKeys.filter((_, index) => index !== foreignKeyIndex);
+    if (table.foreignKeys.length === 0) delete table.foreignKeys;
+    return success(state, start, { messages: ['تم حذف قيد FOREIGN KEY "' + constraintName + '" من الجدول "' + tableName + '".'] });
   }
 
   // 6. ALTER TABLE ADD COLUMN
