@@ -311,6 +311,38 @@ INSERT INTO Students (Id, DepartmentId) VALUES (10, 99);`
   assert.deepStrictEqual(afterFailure.result.errors, []);
 });
  
+test('Self-referencing FOREIGN KEY accepts related rows in one INSERT and protects referenced rows', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE SelfReferenceDB;
+USE SelfReferenceDB;
+CREATE TABLE Employees (
+  Id INT PRIMARY KEY,
+  Name NVARCHAR(30) NOT NULL,
+  ManagerId INT NULL,
+  CONSTRAINT FK_Employees_Manager FOREIGN KEY (ManagerId) REFERENCES Employees(Id)
+);
+INSERT INTO Employees (Id, Name, ManagerId) VALUES
+  (1, 'Manager', NULL),
+  (2, 'Employee', 1);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.databases.selfreferencedb.tables.employees.rows.length, 2);
+
+  const missingManager = executeScript(
+    created.state,
+    "INSERT INTO Employees (Id, Name, ManagerId) VALUES (3, 'Orphan', 99);"
+  );
+  assert.ok(missingManager.result.errors.length > 0);
+  assert.match(missingManager.result.errors[0], /لا تطابق أي قيمة/);
+  assert.strictEqual(missingManager.state.databases.selfreferencedb.tables.employees.rows.length, 2);
+
+  const deleteManager = executeScript(created.state, 'DELETE FROM Employees WHERE Id = 1;');
+  assert.ok(deleteManager.result.errors.length > 0);
+  assert.match(deleteManager.result.errors[0], /مرتبطة بالقيد الخارجي/);
+  assert.strictEqual(deleteManager.state.databases.selfreferencedb.tables.employees.rows.length, 2);
+});
+
 test('BEGIN TRANSACTION and ROLLBACK restore the original data', () => {
   const state = createAdminState();
   const result = executeScript(
