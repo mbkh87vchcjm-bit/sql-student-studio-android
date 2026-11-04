@@ -25,6 +25,12 @@ export interface CheckConstraintModel {
   expression: string;
 }
 
+export interface IndexModel {
+  name: string;
+  columns: string[];
+  unique: boolean;
+}
+
 export interface TableModel {
   name: string;
   columns: ColumnModel[];
@@ -37,6 +43,8 @@ export interface TableModel {
   foreignKeys?: ForeignKeyModel[];
   /** Optional SQL CHECK constraints stored as expressions. */
   checkConstraints?: CheckConstraintModel[];
+  /** Index definitions for teaching schema/index administration. */
+  indexes?: IndexModel[];
 }
 
 export interface DatabaseModel {
@@ -1644,6 +1652,7 @@ function validateTableRows(table: TableModel, rows: StoredRow[]): string | null 
   const uniqueRules = [
     ...table.columns.filter((column) => column.unique).map((column) => [column.name]),
     ...(table.uniqueConstraints ?? []),
+    ...(table.indexes ?? []).filter((index) => index.unique).map((index) => index.columns),
     ...(primaryKeyColumns.length ? [primaryKeyColumns] : []),
   ];
   const checkedRules = new Set<string>();
@@ -2004,6 +2013,57 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: [`تم إنشاء الجدول ${name}.`] });
   }
 
+  // CREATE [UNIQUE] INDEX
+  match = sql.match(/^CREATE\s+(UNIQUE\s+)?INDEX\s+([\[\]\w-]+)\s+ON\s+([\[\]\w.-]+)\s*\(([^)]+)\)$/i);
+  if (match) {
+    const unique = Boolean(match[1]);
+    const indexName = cleanName(match[2]);
+    const tableName = cleanName(match[3]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+
+    const columns = splitTopLevel(match[4]).map(cleanName);
+    if (!columns.length || new Set(columns.map(keyOf)).size !== columns.length) {
+      return errorResult(state, start, 'تعريف الفهرس يحتوي على أعمدة مكررة أو غير صالحة.');
+    }
+    const missingColumn = columns.find((name) => !table.columns.some((column) => keyOf(column.name) === keyOf(name)));
+    if (missingColumn) return errorResult(state, start, 'عمود الفهرس "' + missingColumn + '" غير موجود في الجدول "' + tableName + '".');
+
+    const indexes = table.indexes ?? [];
+    if (indexes.some((index) => keyOf(index.name) === keyOf(indexName))) {
+      return errorResult(state, start, 'الفهرس "' + indexName + '" موجود بالفعل في الجدول "' + tableName + '".');
+    }
+
+    const candidateTable: TableModel = {
+      ...table,
+      indexes: [...indexes, { name: indexName, columns, unique }],
+    };
+    if (unique) {
+      const validationError = validateTableRows(candidateTable, table.rows);
+      if (validationError) return errorResult(state, start, validationError);
+    }
+
+    table.indexes = candidateTable.indexes;
+    return success(state, start, {
+      messages: ['تم إنشاء ' + (unique ? 'فهرس UNIQUE' : 'فهرس') + ' "' + indexName + '" على الجدول "' + tableName + '".'],
+    });
+  }
+
+  // DROP INDEX index_name ON table_name
+  match = sql.match(/^DROP\s+INDEX\s+([\[\]\w-]+)\s+ON\s+([\[\]\w.-]+)$/i);
+  if (match) {
+    const indexName = cleanName(match[1]);
+    const tableName = cleanName(match[2]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const indexes = table.indexes ?? [];
+    const index = indexes.find((item) => keyOf(item.name) === keyOf(indexName));
+    if (!index) return errorResult(state, start, 'الفهرس "' + indexName + '" غير موجود في الجدول "' + tableName + '".');
+    table.indexes = indexes.filter((item) => keyOf(item.name) !== keyOf(indexName));
+    if (table.indexes.length === 0) delete table.indexes;
+    return success(state, start, { messages: ['تم حذف الفهرس "' + indexName + '" من الجدول "' + tableName + '".'] });
+  }
+
   // 5. DROP TABLE
   match = sql.match(/^DROP\s+TABLE\s+([[\]\w.-]+)$/i);
   if (match) {
@@ -2249,8 +2309,11 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const belongsToCheck = (table.checkConstraints ?? []).some((constraint) =>
       checkExpressionReferencesColumn(constraint.expression, columnName)
     );
-    if (column.primaryKey || column.unique || column.defaultConstraintName || belongsToUniqueConstraint || belongsToForeignKey || belongsToCheck) {
-      return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه مرتبط بقيد PRIMARY KEY أو UNIQUE أو FOREIGN KEY أو CHECK أو DEFAULT. احذف القيد أولًا.');
+    const belongsToIndex = (table.indexes ?? []).some((index) =>
+      index.columns.some((indexedColumn) => keyOf(indexedColumn) === keyOf(columnName))
+    );
+    if (column.primaryKey || column.unique || column.defaultConstraintName || belongsToUniqueConstraint || belongsToForeignKey || belongsToCheck || belongsToIndex) {
+      return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه مرتبط بقيد أو فهرس. احذف العنصر المرتبط أولًا.');
     }
     table.columns.splice(columnIndex, 1);
     table.rows = table.rows.map((row) => {
