@@ -1652,6 +1652,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       primaryColumn.primaryKey = true;
       primaryColumn.nullable = false;
     }
+    if (columns.filter((column) => column.primaryKey).length > 1) return errorResult(state, start, 'يدعم هذا الإصدار مفتاحًا رئيسيًا واحدًا فقط لكل جدول.');
     if (columns.length === 0) return errorResult(state, start, 'يجب أن يحتوي الجدول على عمود واحد على الأقل.');
     database.tables[keyOf(name)] = { name, columns, rows: [] };
     return success(state, start, { messages: [`تم إنشاء الجدول ${name}.`] });
@@ -1687,10 +1688,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       defaultValue: defaultMatch ? parseValue(defaultMatch[1].trim()) : undefined,
     };
     if (newColumn.primaryKey) newColumn.nullable = false;
-    const candidateRows = table.rows.map((row) => {
-      const nextValue = newColumn.defaultValue === undefined ? null : newColumn.defaultValue;
-      return { ...row, [newColumn.name]: coerceColumnValue(nextValue, newColumn) };
-    });
+    let candidateRows: StoredRow[];
+    try {
+      candidateRows = table.rows.map((row) => {
+        const nextValue = newColumn.defaultValue === undefined ? null : newColumn.defaultValue;
+        return { ...row, [newColumn.name]: coerceColumnValue(nextValue, newColumn) };
+      });
+    } catch (error) {
+      return errorResult(state, start, error instanceof Error ? error.message : String(error));
+    }
     const validationError = validateTableRows({ ...table, columns: [...table.columns, newColumn] }, candidateRows);
     if (validationError) return errorResult(state, start, validationError);
     table.columns.push(newColumn);
@@ -1837,20 +1843,25 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const setColErr = validateColumnsInTable(table, setCols);
     if (setColErr) return errorResult(state, start, setColErr);
 
-    const updatedRows = table.rows.map((row) => {
-      if (!where || Boolean(evaluateExpression(where, row, undefined, state))) {
-        const copy = { ...row };
-        for (const assignment of assignments) {
-          const col = cleanName(assignment[1]);
-          const rawValue = evaluateExpression(assignment[2], row, undefined, state);
-          const column = table.columns.find((item) => keyOf(item.name) === keyOf(col));
-          if (!column) throw new Error('العمود "' + col + '" غير موجود في الجدول.');
-          copy[col] = coerceColumnValue(rawValue, column);
+    let updatedRows: { modified: boolean; row: StoredRow; original: StoredRow }[];
+    try {
+      updatedRows = table.rows.map((row) => {
+        if (!where || Boolean(evaluateExpression(where, row, undefined, state))) {
+          const copy = { ...row };
+          for (const assignment of assignments) {
+            const col = cleanName(assignment[1]);
+            const rawValue = evaluateExpression(assignment[2], row, undefined, state);
+            const column = table.columns.find((item) => keyOf(item.name) === keyOf(col));
+            if (!column) throw new Error('العمود "' + col + '" غير موجود في الجدول.');
+            copy[col] = coerceColumnValue(rawValue, column);
+          }
+          return { modified: true, row: copy, original: row };
         }
-        return { modified: true, row: copy, original: row };
-      }
-      return { modified: false, row: row, original: row };
-    });
+        return { modified: false, row: row, original: row };
+      });
+    } catch (error) {
+      return errorResult(state, start, error instanceof Error ? error.message : String(error));
+    }
 
     const modifiedCount = updatedRows.filter((r) => r.modified).length;
     const candidateRows = updatedRows.map((item) => item.row);
