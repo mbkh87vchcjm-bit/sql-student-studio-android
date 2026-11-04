@@ -406,6 +406,123 @@ INSERT INTO Employees (Id, Name, ManagerId) VALUES
   assert.strictEqual(deleteManager.state.databases.selfreferencedb.tables.employees.rows.length, 2);
 });
 
+test('CHECK constraints validate INSERT and UPDATE while allowing SQL UNKNOWN', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE CheckDB;
+USE CheckDB;
+CREATE TABLE Products (
+  Id INT PRIMARY KEY,
+  Price DECIMAL(10,2),
+  Quantity INT CHECK (Quantity >= 0),
+  CONSTRAINT CK_Products_Price CHECK (Price >= 0)
+);
+INSERT INTO Products (Id, Price, Quantity) VALUES
+  (1, 10.5, 3),
+  (2, NULL, 0);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.databases.checkdb.tables.products.rows.length, 2);
+
+  const invalidInsert = executeScript(
+    created.state,
+    'INSERT INTO Products (Id, Price, Quantity) VALUES (3, -1, 2);'
+  );
+  assert.ok(invalidInsert.result.errors.length > 0);
+  assert.match(invalidInsert.result.errors[0], /قيد CHECK/);
+  assert.strictEqual(invalidInsert.state.databases.checkdb.tables.products.rows.length, 2);
+
+  const invalidUpdate = executeScript(
+    created.state,
+    'UPDATE Products SET Quantity = -5 WHERE Id = 1;'
+  );
+  assert.ok(invalidUpdate.result.errors.length > 0);
+  assert.match(invalidUpdate.result.errors[0], /قيد CHECK/);
+  assert.strictEqual(invalidUpdate.state.databases.checkdb.tables.products.rows[0].Quantity, 3);
+
+  const nullable = executeScript(
+    created.state,
+    'INSERT INTO Products (Id, Price, Quantity) VALUES (4, NULL, 5);'
+  );
+  assert.deepStrictEqual(nullable.result.errors, []);
+});
+
+test('ALTER TABLE ADD CHECK validates existing data and DROP CONSTRAINT removes it', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE AlterCheckDB;
+USE AlterCheckDB;
+CREATE TABLE Students (Id INT PRIMARY KEY, Score INT);
+INSERT INTO Students (Id, Score) VALUES (1, 80), (2, 90);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const added = executeScript(
+    created.state,
+    'ALTER TABLE Students ADD CONSTRAINT CK_Students_Score CHECK (Score BETWEEN 0 AND 100);'
+  );
+  assert.deepStrictEqual(added.result.errors, []);
+  assert.strictEqual(added.state.databases.altercheckdb.tables.students.checkConstraints?.length, 1);
+
+  const badUpdate = executeScript(
+    added.state,
+    'UPDATE Students SET Score = 120 WHERE Id = 1;'
+  );
+  assert.ok(badUpdate.result.errors.length > 0);
+  assert.match(badUpdate.result.errors[0], /قيد CHECK/);
+
+  const removed = executeScript(
+    added.state,
+    'ALTER TABLE Students DROP CONSTRAINT CK_Students_Score;'
+  );
+  assert.deepStrictEqual(removed.result.errors, []);
+  assert.strictEqual(removed.state.databases.altercheckdb.tables.students.checkConstraints, undefined);
+
+  const nowAllowed = executeScript(
+    removed.state,
+    'UPDATE Students SET Score = 120 WHERE Id = 1;'
+  );
+  assert.deepStrictEqual(nowAllowed.result.errors, []);
+});
+
+test('ALTER TABLE ADD CHECK rejects existing violations without saving the constraint', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE ExistingCheckDB;
+USE ExistingCheckDB;
+CREATE TABLE Items (Id INT PRIMARY KEY, Quantity INT);
+INSERT INTO Items (Id, Quantity) VALUES (1, 5), (2, -3);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const altered = executeScript(
+    created.state,
+    'ALTER TABLE Items ADD CONSTRAINT CK_Items_Quantity CHECK (Quantity >= 0);'
+  );
+  assert.ok(altered.result.errors.length > 0);
+  assert.match(altered.result.errors[0], /قيد CHECK/);
+  assert.strictEqual(altered.state.databases.existingcheckdb.tables.items.checkConstraints, undefined);
+});
+
+test('CHECK constraints prevent dropping columns referenced by their expressions', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE CheckColumnDB;
+USE CheckColumnDB;
+CREATE TABLE Accounts (
+  Id INT PRIMARY KEY,
+  Balance DECIMAL(10,2),
+  CONSTRAINT CK_Accounts_Balance CHECK (Balance >= 0)
+);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const dropped = executeScript(created.state, 'ALTER TABLE Accounts DROP COLUMN Balance;');
+  assert.ok(dropped.result.errors.length > 0);
+  assert.match(dropped.result.errors[0], /PRIMARY KEY أو UNIQUE/);
+  assert.ok(dropped.state.databases.checkcolumndb.tables.accounts.columns.some((column) => column.name === 'Balance'));
+});
+
 test('BEGIN TRANSACTION and ROLLBACK restore the original data', () => {
   const state = createAdminState();
   const result = executeScript(
