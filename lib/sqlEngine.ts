@@ -1480,6 +1480,101 @@ function validateColumnsInTable(table: TableModel, columnNames: string[]): strin
   return null;
 }
 
+
+function coerceColumnValue(value: SqlValue, column: ColumnModel): SqlValue {
+  if (value === null) {
+    if (!column.nullable) throw new Error('العمود "' + column.name + '" لا يقبل NULL.');
+    return null;
+  }
+
+  const compactType = column.type.toUpperCase().replace(/\s+/g, '');
+  const baseType = compactType.match(/^[A-Z]+/)?.[0] ?? compactType;
+
+  if (['CHAR', 'NCHAR', 'VARCHAR', 'NVARCHAR', 'TEXT', 'NTEXT'].includes(baseType)) {
+    const textValue = String(value);
+    const lengthMatch = compactType.match(/\((\d+)\)/);
+    if (lengthMatch && textValue.length > Number(lengthMatch[1])) {
+      throw new Error('قيمة العمود "' + column.name + '" تتجاوز الحد الأقصى للطول ' + lengthMatch[1] + '.');
+    }
+    return textValue;
+  }
+
+  if (['TINYINT', 'SMALLINT', 'INT', 'BIGINT'].includes(baseType)) {
+    const numericValue = typeof value === 'number' ? value : Number(value);
+    if (!Number.isSafeInteger(numericValue)) {
+      throw new Error('قيمة العمود "' + column.name + '" يجب أن تكون عددًا صحيحًا من النوع ' + baseType + '.');
+    }
+    const ranges: Record<string, [number, number]> = {
+      TINYINT: [0, 255],
+      SMALLINT: [-32768, 32767],
+      INT: [-2147483648, 2147483647],
+      BIGINT: [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+    };
+    const range = ranges[baseType];
+    if (numericValue < range[0] || numericValue > range[1]) {
+      throw new Error('قيمة العمود "' + column.name + '" خارج نطاق النوع ' + baseType + '.');
+    }
+    return numericValue;
+  }
+
+  if (['DECIMAL', 'NUMERIC', 'FLOAT', 'REAL', 'MONEY', 'SMALLMONEY'].includes(baseType)) {
+    const numericValue = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(numericValue)) {
+      throw new Error('قيمة العمود "' + column.name + '" يجب أن تكون رقمية من النوع ' + baseType + '.');
+    }
+    return numericValue;
+  }
+
+  if (baseType === 'BIT') {
+    if (typeof value === 'boolean') return value ? 1 : 0;
+    const numericValue = Number(value);
+    if (numericValue !== 0 && numericValue !== 1) {
+      throw new Error('النوع BIT يقبل القيمتين 0 أو 1 فقط في العمود "' + column.name + '".');
+    }
+    return numericValue;
+  }
+
+  if (['DATE', 'DATETIME', 'DATETIME2', 'SMALLDATETIME', 'DATETIMEOFFSET'].includes(baseType)) {
+    if (!parseSqlDate(value)) {
+      throw new Error('قيمة التاريخ في العمود "' + column.name + '" غير صالحة.');
+    }
+    return String(value);
+  }
+
+  if (baseType === 'TIME') {
+    const timeValue = String(value);
+    if (!/^\d{1,2}:\d{2}(:\d{2}(?:\.\d+)?)?$/.test(timeValue)) {
+      throw new Error('قيمة الوقت في العمود "' + column.name + '" غير صالحة.');
+    }
+    return timeValue;
+  }
+
+  return value;
+}
+
+function validateTableRows(table: TableModel, rows: StoredRow[]): string | null {
+  for (const column of table.columns) {
+    const values = new Set<string>();
+    for (const row of rows) {
+      const value = row[column.name] ?? null;
+      if (!column.nullable && value === null) {
+        return 'العمود "' + column.name + '" لا يقبل NULL.';
+      }
+      if (column.primaryKey && value === null) {
+        return 'المفتاح الرئيسي "' + column.name + '" لا يقبل NULL.';
+      }
+      if (column.primaryKey || column.unique) {
+        const key = value === null ? 'NULL' : typeof value + ':' + String(value).toLocaleLowerCase();
+        if (values.has(key)) {
+          return 'قيمة مكررة في العمود الفريد/المفتاح الرئيسي "' + column.name + '".';
+        }
+        values.add(key);
+      }
+    }
+  }
+  return null;
+}
+
 function executeStatement(state: EngineState, statement: string): ExecutionResult {
   const start = Date.now();
   const sql = statement.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '').trim();
@@ -1516,10 +1611,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   if (!database) return errorResult(state, start, 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.');
 
   // 4. CREATE TABLE
+  const createIfNotExists = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\b/i.test(sql);
   match = sql.match(/^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([[\]\w.-]+)\s*\(([\s\S]*)\)$/i);
   if (match) {
     const name = cleanName(match[1]);
-    if (tableFor(database, name)) return errorResult(state, start, `الجدول "${name}" موجود بالفعل.`);
+    if (tableFor(database, name)) {
+      return createIfNotExists
+        ? success(state, start, { messages: [`الجدول "${name}" موجود بالفعل؛ لم يتم تغييره.`] })
+        : errorResult(state, start, `الجدول "${name}" موجود بالفعل.`);
+    }
     const definitions = splitTopLevel(match[2]);
     const columns: ColumnModel[] = [];
     let tablePrimaryKeys: string[] = [];
@@ -1542,7 +1642,17 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
         defaultValue: defaultMatch ? parseValue(defaultMatch[1].trim()) : undefined,
       });
     }
-    for (const column of columns) if (tablePrimaryKeys.some((pName) => keyOf(pName) === keyOf(column.name))) column.primaryKey = true;
+    const duplicateColumn = columns.find((column, index) => columns.some((other, otherIndex) => otherIndex !== index && keyOf(other.name) === keyOf(column.name)));
+    if (duplicateColumn) return errorResult(state, start, `اسم العمود "${duplicateColumn.name}" مكرر.`);
+    if (tablePrimaryKeys.length > 1) return errorResult(state, start, 'المفتاح الرئيسي المركب غير مدعوم في هذا الإصدار التعليمي؛ استخدم مفتاحًا رئيسيًا لعمود واحد.');
+    for (const primaryName of tablePrimaryKeys) {
+      const primaryColumn = columns.find((column) => keyOf(column.name) === keyOf(primaryName));
+      if (!primaryColumn) return errorResult(state, start, `عمود المفتاح الرئيسي "${primaryName}" غير موجود في تعريف الجدول.`);
+      if (primaryColumn.primaryKey) return errorResult(state, start, 'تم تعريف المفتاح الرئيسي أكثر من مرة.');
+      primaryColumn.primaryKey = true;
+      primaryColumn.nullable = false;
+    }
+    if (columns.length === 0) return errorResult(state, start, 'يجب أن يحتوي الجدول على عمود واحد على الأقل.');
     database.tables[keyOf(name)] = { name, columns, rows: [] };
     return success(state, start, { messages: [`تم إنشاء الجدول ${name}.`] });
   }
@@ -1556,8 +1666,108 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: [`تم حذف الجدول ${name}.`] });
   }
 
-  // 6. INSERT INTO
-  match = sql.match(/^INSERT\s+INTO\s+([[\]\w.-]+)(?:\s*\(([^)]*)\))?\s+VALUES\s+([\s\S]+)$/i);
+  // 6. ALTER TABLE ADD COLUMN
+  match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+ADD\s+(?:COLUMN\s+)?([\[\]\w-]+)\s+([A-Z]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)([\s\S]*)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const columnName = cleanName(match[2]);
+    if (table.columns.some((column) => keyOf(column.name) === keyOf(columnName))) {
+      return errorResult(state, start, 'العمود "' + columnName + '" موجود بالفعل في الجدول.');
+    }
+    const rest = match[4] ?? '';
+    const defaultMatch = rest.match(/\bDEFAULT\s+(.+?)(?:\s+NOT\s+NULL|\s+NULL|\s+UNIQUE|\s+PRIMARY\s+KEY|$)/i);
+    const newColumn: ColumnModel = {
+      name: columnName,
+      type: match[3].toUpperCase().replace(/\s+/g, ''),
+      nullable: !/\bNOT\s+NULL\b/i.test(rest) && !/\bPRIMARY\s+KEY\b/i.test(rest),
+      primaryKey: /\bPRIMARY\s+KEY\b/i.test(rest),
+      unique: /\bUNIQUE\b/i.test(rest),
+      defaultValue: defaultMatch ? parseValue(defaultMatch[1].trim()) : undefined,
+    };
+    if (newColumn.primaryKey) newColumn.nullable = false;
+    const candidateRows = table.rows.map((row) => {
+      const nextValue = newColumn.defaultValue === undefined ? null : newColumn.defaultValue;
+      return { ...row, [newColumn.name]: coerceColumnValue(nextValue, newColumn) };
+    });
+    const validationError = validateTableRows({ ...table, columns: [...table.columns, newColumn] }, candidateRows);
+    if (validationError) return errorResult(state, start, validationError);
+    table.columns.push(newColumn);
+    table.rows = candidateRows;
+    return success(state, start, { messages: ['تمت إضافة العمود "' + columnName + '" إلى الجدول "' + tableName + '".'] });
+  }
+
+  // 7. ALTER TABLE ALTER COLUMN
+  match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+ALTER\s+COLUMN\s+([\[\]\w-]+)\s+([A-Z]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)(?:\s+(NOT\s+NULL|NULL))?$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const columnName = cleanName(match[2]);
+    const columnIndex = table.columns.findIndex((column) => keyOf(column.name) === keyOf(columnName));
+    if (columnIndex < 0) return errorResult(state, start, 'العمود "' + columnName + '" غير موجود في الجدول.');
+    const oldColumn = table.columns[columnIndex];
+    const nullability = match[4]?.toUpperCase();
+    if (oldColumn.primaryKey && nullability === 'NULL') {
+      return errorResult(state, start, 'لا يمكن جعل عمود المفتاح الرئيسي يقبل NULL.');
+    }
+    const updatedColumn: ColumnModel = {
+      ...oldColumn,
+      type: match[3].toUpperCase().replace(/\s+/g, ''),
+      nullable: nullability === 'NOT NULL' ? false : nullability === 'NULL' ? true : oldColumn.nullable,
+    };
+    const candidateRows: StoredRow[] = [];
+    try {
+      for (const row of table.rows) {
+        const converted = coerceColumnValue(row[oldColumn.name] ?? null, updatedColumn);
+        candidateRows.push({ ...row, [oldColumn.name]: converted });
+      }
+    } catch (error) {
+      return errorResult(state, start, error instanceof Error ? error.message : String(error));
+    }
+    const validationError = validateTableRows({ ...table, columns: table.columns.map((column, index) => index === columnIndex ? updatedColumn : column) }, candidateRows);
+    if (validationError) return errorResult(state, start, validationError);
+    table.columns[columnIndex] = updatedColumn;
+    table.rows = candidateRows;
+    return success(state, start, { messages: ['تم تعديل تعريف العمود "' + columnName + '" في الجدول "' + tableName + '".'] });
+  }
+
+  // 8. ALTER TABLE DROP COLUMN
+  match = sql.match(/^ALTER\s+TABLE\s+([\[\]\w.-]+)\s+DROP\s+(?:COLUMN\s+)?([\[\]\w-]+)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const columnName = cleanName(match[2]);
+    const columnIndex = table.columns.findIndex((column) => keyOf(column.name) === keyOf(columnName));
+    if (columnIndex < 0) return errorResult(state, start, 'العمود "' + columnName + '" غير موجود في الجدول.');
+    const column = table.columns[columnIndex];
+    if (column.primaryKey || column.unique) {
+      return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه يحمل قيد PRIMARY KEY أو UNIQUE. احذف القيد أولًا.');
+    }
+    table.columns.splice(columnIndex, 1);
+    table.rows = table.rows.map((row) => {
+      const copy = { ...row };
+      delete copy[column.name];
+      return copy;
+    });
+    return success(state, start, { messages: ['تم حذف العمود "' + columnName + '" من الجدول "' + tableName + '".'] });
+  }
+
+  // 9. TRUNCATE TABLE
+  match = sql.match(/^TRUNCATE\s+TABLE\s+([\[\]\w.-]+)$/i);
+  if (match) {
+    const tableName = cleanName(match[1]);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const removedRows = table.rows.length;
+    table.rows = [];
+    return success(state, start, { affectedRows: removedRows, messages: ['تم تفريغ الجدول "' + tableName + '" بنجاح. (' + removedRows + ' صفوف محذوفة)'] });
+  }
+
+  // 10. INSERT INTO
+  match = sql.match(/^INSERT\s+INTO\s+([\[\]\w.-]+)(?:\s*\(([^)]*)\))?\s+VALUES\s+([\s\S]+)$/i);
   if (match) {
     const tableName = cleanName(match[1]);
     const table = tableFor(database, tableName);
@@ -1580,22 +1790,19 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       const row: StoredRow = {};
       for (const column of table.columns) {
         const index = targetColumns.findIndex((target) => keyOf(target) === keyOf(column.name));
-        row[column.name] = index >= 0 ? values[index] : column.defaultValue ?? null;
-        if (!column.nullable && row[column.name] === null) return errorResult(state, start, `العمود "${column.name}" لا يقبل NULL.`);
-      }
-
-      for (const column of table.columns.filter((item) => item.primaryKey || item.unique)) {
-        const valueToCheck = row[column.name];
-        const existsInTable = table.rows.some((existing) => compareValues(existing[column.name], '=', valueToCheck) === true);
-        const existsInPending = pendingRows.some((pending) => compareValues(pending[column.name], '=', valueToCheck) === true);
-        if (existsInTable || existsInPending) {
-          return errorResult(state, start, `قيمة مكررة في العمود الفريد/المفتاح الرئيسي "${column.name}".`);
+        const inputValue = index >= 0 ? values[index] : column.defaultValue ?? null;
+        try {
+          row[column.name] = coerceColumnValue(inputValue, column);
+        } catch (error) {
+          return errorResult(state, start, error instanceof Error ? error.message : String(error));
         }
       }
 
       pendingRows.push(row);
     }
 
+    const validationError = validateTableRows(table, [...table.rows, ...pendingRows]);
+    if (validationError) return errorResult(state, start, validationError);
     table.rows.push(...pendingRows);
     const inserted = pendingRows.length;
     return success(state, start, { affectedRows: inserted, messages: [`(${inserted} rows affected)`] });
@@ -1635,7 +1842,10 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
         const copy = { ...row };
         for (const assignment of assignments) {
           const col = cleanName(assignment[1]);
-          copy[col] = evaluateExpression(assignment[2], row, undefined, state);
+          const rawValue = evaluateExpression(assignment[2], row, undefined, state);
+          const column = table.columns.find((item) => keyOf(item.name) === keyOf(col));
+          if (!column) throw new Error('العمود "' + col + '" غير موجود في الجدول.');
+          copy[col] = coerceColumnValue(rawValue, column);
         }
         return { modified: true, row: copy, original: row };
       }
@@ -1643,21 +1853,11 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     });
 
     const modifiedCount = updatedRows.filter((r) => r.modified).length;
-    if (modifiedCount > 0) {
-      for (const column of table.columns.filter((c) => c.primaryKey || c.unique)) {
-        const valuesSeen = new Set<string>();
-        for (const item of updatedRows) {
-          const val = item.row[column.name];
-          const textVal = String(val).toLowerCase();
-          if (valuesSeen.has(textVal)) {
-            return errorResult(state, start, `قيمة مكررة في العمود الفريد/المفتاح الرئيسي "${column.name}".`);
-          }
-          valuesSeen.add(textVal);
-        }
-      }
-    }
+    const candidateRows = updatedRows.map((item) => item.row);
+    const validationError = validateTableRows(table, candidateRows);
+    if (validationError) return errorResult(state, start, validationError);
 
-    table.rows = updatedRows.map((item) => item.row);
+    table.rows = candidateRows;
     return success(state, start, { affectedRows: modifiedCount, messages: [`(${modifiedCount} rows affected)`] });
   }
 
@@ -1681,7 +1881,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
 
 export function executeScript(state: EngineState, script: string): { state: EngineState; result: ExecutionResult } {
   const start = Date.now();
-  const nextState = cloneState(state);
+  let nextState = cloneState(state);
+  let transactionSnapshot: EngineState | null = null;
   const aggregate: ExecutionResult = {
     columns: [],
     rows: [],
@@ -1696,7 +1897,35 @@ export function executeScript(state: EngineState, script: string): { state: Engi
 
   for (const batch of batches) {
     for (const statement of splitStatements(batch)) {
-      const output = executeStatement(nextState, statement);
+      const normalized = statement.trim();
+      let output: ExecutionResult;
+
+      if (/^BEGIN\s+TRAN(?:SACTION)?$/i.test(normalized)) {
+        if (transactionSnapshot) {
+          output = errorResult(nextState, Date.now(), 'المعاملات المتداخلة غير مدعومة في هذا الإصدار التعليمي.');
+        } else {
+          transactionSnapshot = cloneState(nextState);
+          output = success(nextState, Date.now(), { messages: ['بدأت المعاملة. نفّذ COMMIT للحفظ أو ROLLBACK للتراجع.'] });
+        }
+      } else if (/^COMMIT(?:\s+TRAN(?:SACTION)?)?$/i.test(normalized)) {
+        if (!transactionSnapshot) {
+          output = errorResult(nextState, Date.now(), 'لا توجد معاملة مفتوحة لتنفيذ COMMIT.');
+        } else {
+          transactionSnapshot = null;
+          output = success(nextState, Date.now(), { messages: ['تم اعتماد المعاملة (COMMIT).'] });
+        }
+      } else if (/^ROLLBACK(?:\s+TRAN(?:SACTION)?)?$/i.test(normalized)) {
+        if (!transactionSnapshot) {
+          output = errorResult(nextState, Date.now(), 'لا توجد معاملة مفتوحة لتنفيذ ROLLBACK.');
+        } else {
+          nextState = cloneState(transactionSnapshot);
+          transactionSnapshot = null;
+          output = success(nextState, Date.now(), { messages: ['تم التراجع عن المعاملة (ROLLBACK).'] });
+        }
+      } else {
+        output = executeStatement(nextState, statement);
+      }
+
       aggregate.affectedRows += output.affectedRows;
       aggregate.messages.push(...output.messages);
       aggregate.errors.push(...output.errors);
@@ -1705,12 +1934,27 @@ export function executeScript(state: EngineState, script: string): { state: Engi
         aggregate.rows = output.rows;
       }
       aggregate.database = output.database;
+
       if (output.errors.length) {
+        if (transactionSnapshot) {
+          nextState = cloneState(transactionSnapshot);
+          transactionSnapshot = null;
+          aggregate.messages.push('تم التراجع تلقائيًا عن المعاملة بسبب فشل أحد الأوامر.');
+          aggregate.database = nextState.currentDatabase;
+        }
         aggregate.durationMs = Date.now() - start;
         return { state: nextState, result: aggregate };
       }
     }
   }
+
+  if (transactionSnapshot) {
+    nextState = cloneState(transactionSnapshot);
+    aggregate.errors.push('انتهى السكربت دون تنفيذ COMMIT؛ تم التراجع عن المعاملة تلقائيًا.');
+    aggregate.messages.push('تم إلغاء التغييرات غير المعتمدة لتجنب حفظ بيانات غير مكتملة.');
+    aggregate.database = nextState.currentDatabase;
+  }
+
   aggregate.durationMs = Date.now() - start;
   return { state: nextState, result: aggregate };
 }
