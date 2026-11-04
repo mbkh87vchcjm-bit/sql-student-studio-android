@@ -1373,6 +1373,76 @@ function systemCatalogData(sourceName: string, database: DatabaseModel): Virtual
     return { columns, rows };
   }
 
+  if (source === 'sys.index_columns') {
+    const columns = ['object_id', 'index_id', 'index_column_id', 'column_id', 'key_ordinal', 'is_descending_key', 'is_included_column'];
+    const rows: StoredRow[] = [];
+    for (const table of tables) {
+      let indexId = 1;
+      const addIndexColumns = (indexedColumns: string[]) => {
+        indexedColumns.forEach((columnName, index) => {
+          const columnId = table.columns.findIndex((column) => keyOf(column.name) === keyOf(columnName));
+          if (columnId < 0) return;
+          rows.push({
+            object_id: idFor(table.name),
+            index_id: indexId,
+            index_column_id: index + 1,
+            column_id: columnId + 1,
+            key_ordinal: index + 1,
+            is_descending_key: 0,
+            is_included_column: 0,
+          });
+        });
+        indexId++;
+      };
+      const primaryKeys = table.primaryKeyColumns?.length
+        ? table.primaryKeyColumns
+        : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      if (primaryKeys.length) addIndexColumns(primaryKeys);
+      for (const constraint of table.uniqueConstraints ?? []) addIndexColumns(constraint);
+      for (const column of table.columns.filter((item) => item.unique)) addIndexColumns([column.name]);
+      for (const index of table.indexes ?? []) addIndexColumns(index.columns);
+    }
+    return { columns, rows };
+  }
+
+  if (source === 'sys.key_constraints') {
+    const columns = ['name', 'object_id', 'parent_object_id', 'type', 'type_desc', 'unique_index_id'];
+    const rows: StoredRow[] = [];
+    for (const table of tables) {
+      let indexId = 1;
+      const primaryKeys = table.primaryKeyColumns?.length
+        ? table.primaryKeyColumns
+        : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      if (primaryKeys.length) {
+        rows.push({
+          name: 'PK_' + table.name,
+          object_id: idFor(table.name),
+          parent_object_id: idFor(table.name),
+          type: 'PK',
+          type_desc: 'PRIMARY_KEY_CONSTRAINT',
+          unique_index_id: indexId++,
+        });
+      }
+      (table.uniqueConstraints ?? []).forEach((constraint, index) => rows.push({
+        name: 'UQ_' + table.name + '_' + (index + 1),
+        object_id: idFor(table.name),
+        parent_object_id: idFor(table.name),
+        type: 'UQ',
+        type_desc: 'UNIQUE_CONSTRAINT',
+        unique_index_id: indexId++,
+      }));
+      for (const column of table.columns.filter((item) => item.unique)) rows.push({
+        name: 'UQ_' + table.name + '_' + column.name,
+        object_id: idFor(table.name),
+        parent_object_id: idFor(table.name),
+        type: 'UQ',
+        type_desc: 'UNIQUE_CONSTRAINT',
+        unique_index_id: indexId++,
+      });
+    }
+    return { columns, rows };
+  }
+
   if (source === 'sys.foreign_keys') {
     const columns = ['name', 'parent_object_id', 'referenced_object_id', 'is_disabled', 'is_not_trusted', 'delete_referential_action_desc', 'update_referential_action_desc'];
     const rows: StoredRow[] = [];

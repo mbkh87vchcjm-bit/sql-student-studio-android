@@ -1126,3 +1126,30 @@ test('sys.default_constraints exposes default expressions and their column IDs',
   assert.deepStrictEqual(result.result.errors, []);
   assert.deepStrictEqual(result.result.rows, [['DF_Tasks_Status', '2', "'Open'"]]);
 });
+
+
+/* sys index-column and key-constraint catalog */
+
+test('sys.index_columns exposes composite index column order and joins to sys.indexes', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SysIndexColumnsDB; USE SysIndexColumnsDB; CREATE TABLE Orders (OrderId INT PRIMARY KEY, RegionId INT, ItemCode NVARCHAR(20)); CREATE UNIQUE INDEX UX_Orders_Region_Item ON Orders (RegionId, ItemCode);');
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT i.name, c.name, ic.key_ordinal FROM sys.indexes AS i INNER JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id INNER JOIN sys.columns AS c ON ic.object_id = c.object_id AND ic.column_id = c.column_id ORDER BY i.index_id, ic.key_ordinal;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['PK_Orders', 'OrderId', '1'],
+    ['UX_Orders_Region_Item', 'RegionId', '1'],
+    ['UX_Orders_Region_Item', 'ItemCode', '2'],
+  ]);
+});
+
+test('sys.key_constraints distinguishes primary-key and unique constraints', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SysKeysDB; USE SysKeysDB; CREATE TABLE Users (Id INT PRIMARY KEY, Email NVARCHAR(50) UNIQUE, UserCode NVARCHAR(20), CONSTRAINT UQ_Users_Code UNIQUE (UserCode));');
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, 'SELECT name, type, type_desc FROM sys.key_constraints ORDER BY type;');
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['PK_Users', 'PK', 'PRIMARY_KEY_CONSTRAINT'],
+    ['UQ_Users_Email', 'UQ', 'UNIQUE_CONSTRAINT'],
+    ['UQ_Users_1', 'UQ', 'UNIQUE_CONSTRAINT'],
+  ]);
+});
