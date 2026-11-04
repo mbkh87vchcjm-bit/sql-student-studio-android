@@ -1879,7 +1879,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   if (!database) return errorResult(state, start, 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.');
 
   // SET IDENTITY_INSERT table ON | OFF
-  match = sql.match(/^SET\\s+IDENTITY_INSERT\\s+([\\[\\]\\w.-]+)\\s+(ON|OFF)$/i);
+  match = sql.match(/^SET\s+IDENTITY_INSERT\s+([\[\]\w.-]+)\s+(ON|OFF)$/i);
   if (match) {
     const tableName = cleanName(match[1]);
     const table = tableFor(database, tableName);
