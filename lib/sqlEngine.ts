@@ -2201,6 +2201,70 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: [`تم حذف العرض "${viewName}".`] });
   }
 
+  // DBCC CHECKIDENT: inspect or reseed the simulated IDENTITY counter.
+  match = sql.match(/^DBCC\\s+CHECKIDENT\\s*\\(([\\s\\S]*)\\)$/i);
+  if (match) {
+    const args = splitTopLevel(match[1]);
+    if (args.length < 1 || args.length > 3) {
+      return errorResult(state, start, "صيغة DBCC CHECKIDENT غير صحيحة. استخدم DBCC CHECKIDENT ('Table', NORESEED) أو RESEED, value.");
+    }
+    const rawTableName = args[0].trim();
+    const parsedTableName = parseValue(rawTableName);
+    const tableName = typeof parsedTableName === 'string' ? cleanName(parsedTableName) : cleanName(rawTableName);
+    const table = tableFor(database, tableName);
+    if (!table) return errorResult(state, start, 'الجدول "' + tableName + '" غير موجود.');
+    const identityColumn = table.columns.find((column) => column.identity);
+    if (!identityColumn?.identity) {
+      return errorResult(state, start, 'الجدول "' + tableName + '" لا يحتوي على عمود IDENTITY.');
+    }
+
+    const mode = (args[1] ?? 'NORESEED').trim().toUpperCase();
+    if (mode !== 'NORESEED' && mode !== 'RESEED') {
+      return errorResult(state, start, 'الخيار المدعوم هو NORESEED أو RESEED.');
+    }
+    if (mode === 'NORESEED') {
+      if (args.length !== 2) return errorResult(state, start, 'لا تقبل NORESEED قيمة إعادة ضبط.');
+      const identityValues = table.rows
+        .map((row) => row[identityColumn.name])
+        .filter((value): value is number => typeof value === 'number');
+      const currentValue = identityValues.length
+        ? (identityColumn.identity.increment > 0
+          ? Math.max(...identityValues)
+          : Math.min(...identityValues))
+        : null;
+      return success(state, start, {
+        columns: ['TableName', 'IdentityColumn', 'CurrentIdentityValue', 'NextIdentityValue'],
+        rows: [[table.name, identityColumn.name, valueToText(currentValue), String(identityColumn.identity.nextValue)]],
+        messages: ['تم فحص عداد IDENTITY دون تغييره.'],
+      });
+    }
+
+    if (args.length !== 3 || !/^-?\\d+$/.test(args[2].trim())) {
+      return errorResult(state, start, 'استخدم RESEED مع قيمة صحيحة صريحة، مثل DBCC CHECKIDENT (\'' + tableName + '\', RESEED, 100).');
+    }
+    const reseedValue = Number(args[2].trim());
+    if (!Number.isSafeInteger(reseedValue)) {
+      return errorResult(state, start, 'قيمة RESEED يجب أن تكون عددًا صحيحًا آمنًا.');
+    }
+    let coercedReseed: SqlValue;
+    try {
+      coercedReseed = coerceColumnValue(reseedValue, identityColumn);
+    } catch (error) {
+      return errorResult(state, start, error instanceof Error ? error.message : String(error));
+    }
+    if (coercedReseed === null || typeof coercedReseed !== 'number') {
+      return errorResult(state, start, 'قيمة RESEED غير صالحة لعمود IDENTITY.');
+    }
+    // SQL Server uses the reseed value itself for the first insert into an empty table;
+    // for a non-empty table, the next generated value is reseed + increment.
+    identityColumn.identity.nextValue = table.rows.length === 0
+      ? coercedReseed
+      : coercedReseed + identityColumn.identity.increment;
+    return success(state, start, {
+      messages: ['تمت إعادة ضبط عداد IDENTITY في الجدول "' + tableName + '". القيمة التالية: ' + identityColumn.identity.nextValue + '.'],
+    });
+  }
+
   // SET IDENTITY_INSERT table ON | OFF
   match = sql.match(/^SET\s+IDENTITY_INSERT\s+([\[\]\w.-]+)\s+(ON|OFF)$/i);
   if (match) {

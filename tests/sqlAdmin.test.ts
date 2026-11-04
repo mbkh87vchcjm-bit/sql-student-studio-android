@@ -959,3 +959,57 @@ test('INFORMATION_SCHEMA metadata supports qualified JOINs and filters', () => {
   assert.deepStrictEqual(result.result.errors, []);
   assert.deepStrictEqual(result.result.rows, [['Ledger', 'Id'], ['Ledger', 'Name'], ['Ledger', 'Balance']]);
 });
+
+
+/* ==========================================================================
+   DBCC CHECKIDENT: identity counter inspection and reseeding
+   ========================================================================== */
+
+test('DBCC CHECKIDENT NORESEED reports identity state without changing it', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityDB; USE IdentityDB; CREATE TABLE Jobs (Id INT IDENTITY(5,2) PRIMARY KEY, Title NVARCHAR(20)); INSERT INTO Jobs (Title) VALUES ('A'), ('B');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  const checked = executeScript(created.state, "DBCC CHECKIDENT ('Jobs', NORESEED);");
+  assert.deepStrictEqual(checked.result.errors, []);
+  assert.deepStrictEqual(checked.result.columns, ['TableName', 'IdentityColumn', 'CurrentIdentityValue', 'NextIdentityValue']);
+  assert.deepStrictEqual(checked.result.rows, [['Jobs', 'Id', '7', '9']]);
+  assert.strictEqual(checked.state.databases.identitydb.tables.jobs.columns[0].identity?.nextValue, 9);
+});
+
+test('DBCC CHECKIDENT RESEED on a non-empty table generates reseed plus increment', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityDB; USE IdentityDB; CREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Title NVARCHAR(20)); INSERT INTO Jobs (Title) VALUES ('A'), ('B');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  const reseeded = executeScript(created.state, "DBCC CHECKIDENT ('Jobs', RESEED, 100);");
+  assert.deepStrictEqual(reseeded.result.errors, []);
+  const inserted = executeScript(reseeded.state, "INSERT INTO Jobs (Title) VALUES ('C'); SELECT Id FROM Jobs WHERE Title = 'C';");
+  assert.deepStrictEqual(inserted.result.errors, []);
+  assert.deepStrictEqual(inserted.result.rows, [['101']]);
+});
+
+test('DBCC CHECKIDENT RESEED on an empty table uses the supplied value for the next row', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    'CREATE DATABASE IdentityDB; USE IdentityDB; CREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Title NVARCHAR(20));'
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  const reseeded = executeScript(created.state, "DBCC CHECKIDENT ('Jobs', RESEED, 50);");
+  assert.deepStrictEqual(reseeded.result.errors, []);
+  const inserted = executeScript(reseeded.state, "INSERT INTO Jobs (Title) VALUES ('First'); SELECT Id FROM Jobs;");
+  assert.deepStrictEqual(inserted.result.errors, []);
+  assert.deepStrictEqual(inserted.result.rows, [['50']]);
+});
+
+test('DBCC CHECKIDENT rejects non-identity tables and invalid reseed values atomically', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE IdentityDB; USE IdentityDB; CREATE TABLE PlainTable (Id INT PRIMARY KEY);');
+  assert.deepStrictEqual(created.result.errors, []);
+  const noIdentity = executeScript(created.state, "DBCC CHECKIDENT ('PlainTable', NORESEED);");
+  assert.ok(noIdentity.result.errors.length > 0);
+  const badMode = executeScript(created.state, "DBCC CHECKIDENT ('PlainTable', RESET);");
+  assert.ok(badMode.result.errors.length > 0);
+  assert.strictEqual(created.state.databases.identitydb.tables.plaintable.columns[0].identity, undefined);
+});
