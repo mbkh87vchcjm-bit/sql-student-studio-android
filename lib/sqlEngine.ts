@@ -15,6 +15,10 @@ export interface TableModel {
   name: string;
   columns: ColumnModel[];
   rows: StoredRow[];
+  /** Optional for backward compatibility with previously saved workspaces. */
+  primaryKeyColumns?: string[];
+  /** Table-level UNIQUE constraints; each item contains the constrained columns. */
+  uniqueConstraints?: string[][];
 }
 
 export interface DatabaseModel {
@@ -1553,28 +1557,51 @@ function coerceColumnValue(value: SqlValue, column: ColumnModel): SqlValue {
 }
 
 function validateTableRows(table: TableModel, rows: StoredRow[]): string | null {
+  const primaryKeyColumns = table.primaryKeyColumns?.length
+    ? table.primaryKeyColumns
+    : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+
   for (const column of table.columns) {
-    const values = new Set<string>();
     for (const row of rows) {
       const value = row[column.name] ?? null;
       if (!column.nullable && value === null) {
         return 'العمود "' + column.name + '" لا يقبل NULL.';
       }
-      if (column.primaryKey && value === null) {
-        return 'المفتاح الرئيسي "' + column.name + '" لا يقبل NULL.';
-      }
-      if (column.primaryKey || column.unique) {
-        const key = value === null ? 'NULL' : typeof value + ':' + String(value).toLocaleLowerCase();
-        if (values.has(key)) {
-          return 'قيمة مكررة في العمود الفريد/المفتاح الرئيسي "' + column.name + '".';
-        }
-        values.add(key);
-      }
     }
   }
+
+  const uniqueRules = [
+    ...table.columns.filter((column) => column.unique).map((column) => [column.name]),
+    ...(table.uniqueConstraints ?? []),
+    ...(primaryKeyColumns.length ? [primaryKeyColumns] : []),
+  ];
+  const checkedRules = new Set<string>();
+
+  for (const columns of uniqueRules) {
+    const normalizedColumns = columns.map(keyOf);
+    const ruleId = normalizedColumns.join("|");
+    if (checkedRules.has(ruleId)) continue;
+    checkedRules.add(ruleId);
+
+    const values = new Set<string>();
+    for (const row of rows) {
+      const keyValues = columns.map((columnName) => {
+        const column = table.columns.find((item) => keyOf(item.name) === keyOf(columnName));
+        const value = column ? row[column.name] ?? null : null;
+        if (typeof value === "string") return "string:" + value.toLocaleLowerCase();
+        if (value === null) return "null:";
+        return typeof value + ":" + String(value);
+      });
+      const key = JSON.stringify(keyValues);
+      if (values.has(key)) {
+        return 'قيمة مكررة في قيد UNIQUE أو PRIMARY KEY (' + columns.join(", ") + ').';
+      }
+      values.add(key);
+    }
+  }
+
   return null;
 }
-
 function executeStatement(state: EngineState, statement: string): ExecutionResult {
   const start = Date.now();
   const sql = statement.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '').trim();
@@ -1623,10 +1650,17 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const definitions = splitTopLevel(match[2]);
     const columns: ColumnModel[] = [];
     let tablePrimaryKeys: string[] = [];
+    const tableUniqueConstraints: string[][] = [];
     for (const definition of definitions) {
-      const primary = definition.match(/^PRIMARY\s+KEY\s*\((.+)\)$/i);
+      const primary = definition.match(/^(?:CONSTRAINT\s+[\[\]\w-]+\s+)?PRIMARY\s+KEY\s*\((.+)\)$/i);
       if (primary) {
+        if (tablePrimaryKeys.length) return errorResult(state, start, 'لا يمكن تعريف أكثر من قيد PRIMARY KEY للجدول.');
         tablePrimaryKeys = splitTopLevel(primary[1]).map(cleanName);
+        continue;
+      }
+      const unique = definition.match(/^(?:CONSTRAINT\s+[\[\]\w-]+\s+)?UNIQUE\s*\((.+)\)$/i);
+      if (unique) {
+        tableUniqueConstraints.push(splitTopLevel(unique[1]).map(cleanName));
         continue;
       }
       const columnMatch = definition.match(/^([[\]\w-]+)\s+([A-Z]+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?)([\s\S]*)$/i);
@@ -1644,17 +1678,36 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     }
     const duplicateColumn = columns.find((column, index) => columns.some((other, otherIndex) => otherIndex !== index && keyOf(other.name) === keyOf(column.name)));
     if (duplicateColumn) return errorResult(state, start, `اسم العمود "${duplicateColumn.name}" مكرر.`);
-    if (tablePrimaryKeys.length > 1) return errorResult(state, start, 'المفتاح الرئيسي المركب غير مدعوم في هذا الإصدار التعليمي؛ استخدم مفتاحًا رئيسيًا لعمود واحد.');
+    if (new Set(tablePrimaryKeys.map(keyOf)).size !== tablePrimaryKeys.length) {
+      return errorResult(state, start, 'لا يجوز تكرار العمود داخل قيد PRIMARY KEY.');
+    }
+    if (tablePrimaryKeys.length && columns.some((column) => column.primaryKey)) {
+      return errorResult(state, start, 'تم تعريف المفتاح الرئيسي أكثر من مرة.');
+    }
     for (const primaryName of tablePrimaryKeys) {
       const primaryColumn = columns.find((column) => keyOf(column.name) === keyOf(primaryName));
       if (!primaryColumn) return errorResult(state, start, `عمود المفتاح الرئيسي "${primaryName}" غير موجود في تعريف الجدول.`);
-      if (primaryColumn.primaryKey) return errorResult(state, start, 'تم تعريف المفتاح الرئيسي أكثر من مرة.');
       primaryColumn.primaryKey = true;
       primaryColumn.nullable = false;
     }
-    if (columns.filter((column) => column.primaryKey).length > 1) return errorResult(state, start, 'يدعم هذا الإصدار مفتاحًا رئيسيًا واحدًا فقط لكل جدول.');
+    for (const uniqueColumns of tableUniqueConstraints) {
+      if (!uniqueColumns.length || new Set(uniqueColumns.map(keyOf)).size !== uniqueColumns.length) {
+        return errorResult(state, start, 'قيد UNIQUE يحتوي على أعمدة مكررة أو غير صالحة.');
+      }
+      const missingColumn = uniqueColumns.find((columnName) => !columns.some((column) => keyOf(column.name) === keyOf(columnName)));
+      if (missingColumn) return errorResult(state, start, `عمود UNIQUE "${missingColumn}" غير موجود في تعريف الجدول.`);
+    }
     if (columns.length === 0) return errorResult(state, start, 'يجب أن يحتوي الجدول على عمود واحد على الأقل.');
-    database.tables[keyOf(name)] = { name, columns, rows: [] };
+    const primaryKeyColumns = tablePrimaryKeys.length
+      ? tablePrimaryKeys
+      : columns.filter((column) => column.primaryKey).map((column) => column.name);
+    database.tables[keyOf(name)] = {
+      name,
+      columns,
+      rows: [],
+      ...(primaryKeyColumns.length ? { primaryKeyColumns } : {}),
+      ...(tableUniqueConstraints.length ? { uniqueConstraints: tableUniqueConstraints } : {}),
+    };
     return success(state, start, { messages: [`تم إنشاء الجدول ${name}.`] });
   }
 
@@ -1749,7 +1802,10 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const columnIndex = table.columns.findIndex((column) => keyOf(column.name) === keyOf(columnName));
     if (columnIndex < 0) return errorResult(state, start, 'العمود "' + columnName + '" غير موجود في الجدول.');
     const column = table.columns[columnIndex];
-    if (column.primaryKey || column.unique) {
+    const belongsToUniqueConstraint = (table.uniqueConstraints ?? []).some((constraint) =>
+      constraint.some((name) => keyOf(name) === keyOf(columnName))
+    );
+    if (column.primaryKey || column.unique || belongsToUniqueConstraint) {
       return errorResult(state, start, 'لا يمكن حذف العمود "' + columnName + '" لأنه يحمل قيد PRIMARY KEY أو UNIQUE. احذف القيد أولًا.');
     }
     table.columns.splice(columnIndex, 1);
