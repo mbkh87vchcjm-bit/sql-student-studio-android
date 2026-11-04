@@ -282,6 +282,31 @@ CREATE TABLE Departments (
   assert.ok(nonUniqueTarget.result.errors.length > 0);
   assert.match(nonUniqueTarget.result.errors[0], /PRIMARY KEY أو UNIQUE/);
   assert.strictEqual(Boolean(nonUniqueTarget.state.databases.foreigndefinitiondb.tables.badchild), false);
+
+  const incompatibleTypes = executeScript(
+    base.state,
+    'CREATE TABLE IncompatibleChild (Id INT PRIMARY KEY, DepartmentId NVARCHAR(20), FOREIGN KEY (DepartmentId) REFERENCES Departments(Id));'
+  );
+  assert.ok(incompatibleTypes.result.errors.length > 0);
+  assert.match(incompatibleTypes.result.errors[0], /نوع عمود المفتاح الخارجي/);
+  assert.strictEqual(Boolean(incompatibleTypes.state.databases.foreigndefinitiondb.tables.incompatiblechild), false);
+
+  const compositeParent = executeScript(
+    base.state,
+    `CREATE TABLE CompositeDepartments (
+      RegionId INT,
+      DepartmentId INT,
+      CONSTRAINT PK_CompositeDepartments PRIMARY KEY (RegionId, DepartmentId)
+    );`
+  );
+  assert.deepStrictEqual(compositeParent.result.errors, []);
+  const partialCompositeReference = executeScript(
+    compositeParent.state,
+    'CREATE TABLE PartialChild (Id INT PRIMARY KEY, RegionId INT, FOREIGN KEY (RegionId) REFERENCES CompositeDepartments(RegionId));'
+  );
+  assert.ok(partialCompositeReference.result.errors.length > 0);
+  assert.match(partialCompositeReference.result.errors[0], /PRIMARY KEY أو UNIQUE/);
+  assert.strictEqual(Boolean(partialCompositeReference.state.databases.foreigndefinitiondb.tables.partialchild), false);
 });
 
 test('ALTER TABLE ADD FOREIGN KEY validates existing rows before saving the constraint', () => {
@@ -311,6 +336,44 @@ INSERT INTO Students (Id, DepartmentId) VALUES (10, 99);`
   assert.deepStrictEqual(afterFailure.result.errors, []);
 });
  
+test('ALTER TABLE DROP CONSTRAINT removes a foreign key and releases the parent table', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE DropForeignKeyDB;
+USE DropForeignKeyDB;
+CREATE TABLE Departments (Id INT PRIMARY KEY);
+INSERT INTO Departments (Id) VALUES (1);
+CREATE TABLE Students (
+  Id INT PRIMARY KEY,
+  DepartmentId INT,
+  CONSTRAINT FK_Students_Departments FOREIGN KEY (DepartmentId) REFERENCES Departments(Id)
+);
+INSERT INTO Students (Id, DepartmentId) VALUES (10, 1);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const removed = executeScript(
+    created.state,
+    'ALTER TABLE Students DROP CONSTRAINT FK_Students_Departments;'
+  );
+  assert.deepStrictEqual(removed.result.errors, []);
+  assert.strictEqual(removed.state.databases.dropforeignkeydb.tables.students.foreignKeys, undefined);
+
+  const parentDelete = executeScript(
+    removed.state,
+    'DELETE FROM Departments WHERE Id = 1;'
+  );
+  assert.deepStrictEqual(parentDelete.result.errors, []);
+  assert.strictEqual(parentDelete.state.databases.dropforeignkeydb.tables.departments.rows.length, 0);
+
+  const orphanInsert = executeScript(
+    parentDelete.state,
+    'INSERT INTO Students (Id, DepartmentId) VALUES (11, 99);'
+  );
+  assert.deepStrictEqual(orphanInsert.result.errors, []);
+  assert.strictEqual(orphanInsert.state.databases.dropforeignkeydb.tables.students.rows.length, 2);
+});
+
 test('Self-referencing FOREIGN KEY accepts related rows in one INSERT and protects referenced rows', () => {
   const created = executeScript(
     EMPTY_STATE,
