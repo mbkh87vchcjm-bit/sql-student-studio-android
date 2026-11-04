@@ -1018,8 +1018,11 @@ test('DBCC CHECKIDENT rejects non-identity tables and invalid reseed values atom
 /* SQL Server-style sys catalog subset */
 
 test('sys.tables, sys.views and sys.objects list simulated objects', () => {
-  const state = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT PRIMARY KEY, Name NVARCHAR(50)); CREATE VIEW StudentNames AS SELECT Name FROM Students;');
-  assert.deepStrictEqual(state.result.errors, []);
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT PRIMARY KEY, FullName NVARCHAR(50));');
+  assert.deepStrictEqual(created.result.errors, []);
+  const viewCreated = executeScript(created.state, 'CREATE VIEW StudentNames AS SELECT FullName FROM Students;');
+  assert.deepStrictEqual(viewCreated.result.errors, []);
+  const state = viewCreated;
   const tables = executeScript(state.state, 'SELECT name, type_desc FROM sys.tables;');
   assert.deepStrictEqual(tables.result.errors, []);
   assert.deepStrictEqual(tables.result.rows, [['Students', 'USER_TABLE']]);
@@ -1044,8 +1047,11 @@ test('sys.columns joins to sys.tables through stable simulator object IDs', () =
 });
 
 test('sys.columns exposes view output names with unknown expression types as NULL', () => {
-  const state = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT, Name NVARCHAR(50)); CREATE VIEW StudentNames AS SELECT Name AS DisplayName FROM Students;');
-  assert.deepStrictEqual(state.result.errors, []);
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SystemCatalogDB; USE SystemCatalogDB; CREATE TABLE Students (Id INT, FullName NVARCHAR(50));');
+  assert.deepStrictEqual(created.result.errors, []);
+  const viewCreated = executeScript(created.state, 'CREATE VIEW StudentNames AS SELECT FullName AS DisplayName FROM Students;');
+  assert.deepStrictEqual(viewCreated.result.errors, []);
+  const state = viewCreated;
   const result = executeScript(state.state, "SELECT c.name, c.system_type_id FROM sys.views AS v INNER JOIN sys.columns AS c ON v.object_id = c.object_id WHERE v.name = 'StudentNames';");
   assert.deepStrictEqual(result.result.errors, []);
   assert.deepStrictEqual(result.result.rows, [['DisplayName', 'NULL']]);
