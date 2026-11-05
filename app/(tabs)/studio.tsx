@@ -12,23 +12,24 @@ export default function StudioScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { script, setScript, execute, result, locale } = useStudio();
+  const { script, setScript, execute, result, locale, hydrated } = useStudio();
   const isArabic = locale === 'ar';
   return (
     <KeyboardAvoidingView behavior="padding" style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView contentContainerStyle={[styles.content, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 110 }]} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-        <View style={styles.toolbar}><Pressable onPress={() => router.back()} style={styles.back}><Feather name="arrow-right" size={20} color={colors.foreground} /></Pressable><View style={styles.toolbarTitle}><Text style={[styles.toolbarEyebrow, { color: colors.primary }]}>{isArabic ? 'المحرر' : 'EDITOR'}</Text><Text style={[styles.toolbarText, { color: colors.foreground }]}>{isArabic ? 'استوديو SQL' : 'SQL Studio'}</Text></View><IconButton icon="play" onPress={execute} label={isArabic ? 'تشغيل' : 'Run'} tone="primary" /></View>
+        <View style={styles.toolbar}><Pressable onPress={() => router.back()} style={styles.back}><Feather name="arrow-right" size={20} color={colors.foreground} /></Pressable><View style={styles.toolbarTitle}><Text style={[styles.toolbarEyebrow, { color: colors.primary }]}>{isArabic ? 'المحرر' : 'EDITOR'}</Text><Text style={[styles.toolbarText, { color: colors.foreground }]}>{isArabic ? 'استوديو SQL' : 'SQL Studio'}</Text></View><IconButton icon="play" onPress={execute} label={isArabic ? 'تشغيل' : 'Run'} tone="primary" disabled={!hydrated} /></View>
         <ScreenHeader title={isArabic ? 'اكتب، نفّذ، وتعلّم.' : 'Write, run, learn.'} subtitle={isArabic ? 'يدعم المحرك أوامر T-SQL التعليمية الأساسية مع GO بين الدفعات.' : 'The engine supports core educational T-SQL with GO between batches.'} />
+        {!hydrated && <Text accessibilityRole="text" style={{ color: colors.mutedForeground, fontSize: 12 }}>{isArabic ? 'جارٍ تحميل مساحة العمل المحفوظة…' : 'Loading saved workspace…'}</Text>}
         <SectionLabel action={<Text style={[styles.ltrHint, { color: colors.editorMuted }]}>{isArabic ? 'النص من اليسار إلى اليمين' : 'LTR editor'}</Text>}>{isArabic ? 'نص الاستعلام' : 'Query script'}</SectionLabel>
         <View style={[styles.editorShell, { backgroundColor: colors.editor }]}>
           <View style={styles.editorTop}><View style={styles.windowDots}><View style={[styles.dot, { backgroundColor: colors.accent }]} /><View style={[styles.dot, { backgroundColor: colors.primary }]} /><View style={[styles.dot, { backgroundColor: colors.editorMuted }]} /></View><Text style={[styles.editorLabel, { color: colors.editorMuted }]}>lesson.sql</Text><Pressable testID="clear-script" onPress={() => setScript('')}><Feather name="trash-2" size={15} color={colors.editorMuted} /></Pressable></View>
-          <TextInput testID="sql-editor" value={script} onChangeText={setScript} multiline autoCapitalize="none" autoCorrect={false} spellCheck={false} textAlign="left" textAlignVertical="top" style={[styles.editorInput, { color: colors.editorForeground }]} placeholder="SELECT * FROM Students;" placeholderTextColor={colors.editorMuted} />
+          <TextInput testID="sql-editor" accessibilityLabel={isArabic ? 'محرر أوامر SQL' : 'SQL query editor'} value={script} onChangeText={setScript} multiline autoCapitalize="none" autoCorrect={false} spellCheck={false} textAlign="left" textAlignVertical="top" style={[styles.editorInput, { color: colors.editorForeground }]} placeholder="SELECT * FROM Students;" placeholderTextColor={colors.editorMuted} />
         </View>
         <View style={styles.quickRow}>
           <Text style={[styles.quickLabel, { color: colors.mutedForeground }]}>{isArabic ? 'أمثلة سريعة' : 'Quick examples'}</Text>
           {['SELECT * FROM Students;', 'SELECT Name, Age FROM Students WHERE Age >= 20;'].map((example) => <Pressable key={example} onPress={() => setScript(example)} style={[styles.exampleChip, { backgroundColor: colors.secondary }]}><Text numberOfLines={1} style={[styles.exampleText, { color: colors.secondaryForeground }]}>{example}</Text></Pressable>)}
         </View>
-        <ResultPanel result={result} emptyLabel={isArabic ? 'ستظهر النتائج هنا بعد التشغيل' : 'Results will appear here after execution'} />
+        <ResultPanel result={result} locale={locale} emptyLabel={isArabic ? 'ستظهر النتائج هنا بعد التشغيل' : 'Results will appear here after execution'} />
       </ScrollView>
     </KeyboardAvoidingView>
   );

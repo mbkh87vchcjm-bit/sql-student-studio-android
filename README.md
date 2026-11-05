@@ -2,6 +2,8 @@
 
 تطبيق تعليمي تفاعلي للطلاب يهدف إلى توفير بيئة محلية وسريعة لتعلم واختبار أوامر T-SQL مباشرة من هاتف Android، بدون الحاجة إلى الاتصال بـ Microsoft SQL Server حقيقي أو وجود اتصال بالإنترنت.
 
+> **Note:** SQL Student Studio is an educational local SQL/T-SQL engine. It is not Microsoft SQL Server.
+
 ---
 
 ## 🚀 التقنيات الأساسية (Tech Stack)
@@ -17,24 +19,169 @@
 ## ✨ المميزات والوظائف المتاحة
 
 - **محرر SQL تفاعلي (SQL Studio):** كتابة استعلامات متعددة الأسطر مع خيارات التشغيل الفوري وإظهار نتائج الجداول وزمن التنفيذ.
-- **مستكشف قواعد البيانات (Data Explorer):** عرض شجري تفاعلي لقواعد البيانات والجداول والأعمدة يتردد تحديثه تلقائيًا.
+- **مستكشف قواعد البيانات (Data Explorer):** يعرض قواعد البيانات والمخطط الحالي والجداول وأعمدتها والفهارس والعروض، مع تمييز قاعدة البيانات النشطة.
 - **إعدادات وحفظ حالة تلقائي:** التبديل بين العربية والإنجليزية، وتخزين قواعد البيانات محليًا عبر AsyncStorage، مع زر مسح مساحة العمل آمن يطلب التأكيد قبل الحذف.
-- **محرك T-SQL محلي مستقل:** تنفيذ العمليات مع ضمان الذرية (Atomicity) والتحقق الصارم من وجود الأعمدة والأخطاء التكرارية (Primary Key / Unique constraints).
+- **محرك SQL تعليمي محلي:** ينفّذ مجموعة محددة ومختبرة من أوامر T-SQL والدوال والربط والاستعلامات الفرعية والمعاملات، مع توثيق صريح للميزات غير المدعومة.
 
 ---
 
-## 📜 أوامر SQL المدعومة (Supported T-SQL Commands)
+## 📜 الأوامر والدوال المدعومة (Supported Features & T-SQL Commands)
 
+### 1. DDL (Data Definition Language)
 - `CREATE DATABASE <name>`
 - `DROP DATABASE <name>`
 - `USE <database>`
-- `CREATE TABLE <table_name> (...)`
+- `CREATE TABLE <table_name> (...)` مع دعم القيود: `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `DEFAULT`
 - `DROP TABLE <table_name>`
-- `INSERT INTO <table_name> (...) VALUES (...)`
-- `SELECT [DISTINCT] [TOP n] <columns|*> FROM <table_name> [WHERE ...] [ORDER BY ...]`
-- `UPDATE <table_name> SET col = val [WHERE ...]`
+
+```sql
+CREATE DATABASE University;
+GO
+USE University;
+GO
+CREATE TABLE Students (
+  Id INT PRIMARY KEY,
+  Name NVARCHAR(100) NOT NULL,
+  Age INT,
+  Grade INT,
+  DepartmentID INT,
+  Phone NVARCHAR(20)
+);
+```
+
+### 2. DML (Data Manipulation Language)
+- `INSERT INTO <table_name> [(cols)] VALUES (...)`
+- `UPDATE <table_name> SET col = expr [WHERE ...]`
 - `DELETE FROM <table_name> [WHERE ...]`
-- `GO [n]` (يفصل بين الدفعات ويسمح بتكرار الدفعة n من المرات)
+- `GO [n]` (تكرار الدفعة n من المرات)
+
+```sql
+INSERT INTO Students (Id, Name, Age, Grade, DepartmentID, Phone) VALUES
+  (1, 'Ali Hassan', 20, 85, 1, '0101234567'),
+  (2, 'Ahmed Khaled', 21, 92, 1, NULL);
+
+UPDATE Students SET Grade = 90 WHERE Id = 1;
+DELETE FROM Students WHERE Grade < 60;
+```
+
+### 3. DQL & Clauses
+- `SELECT [DISTINCT] [TOP n] <exprs|*> FROM <source>`
+- `WHERE <condition>`
+- `GROUP BY <cols>`
+- `HAVING <condition>`
+- `ORDER BY <col> [ASC|DESC]`
+- `LIKE` مع الأنماط الأساسية (`'A%'`, `'%'`, `'a_c'`, `'%abc%'`)
+
+```sql
+SELECT DISTINCT DepartmentID FROM Students;
+
+SELECT DepartmentID, COUNT(*) AS Total, AVG(Grade) AS AvgGrade
+FROM Students
+WHERE Grade >= 60
+GROUP BY DepartmentID
+HAVING COUNT(*) >= 2
+ORDER BY AvgGrade DESC;
+```
+
+### 4. Functions (الدوال)
+
+#### أ. الدوال النصية (String Functions)
+- `UPPER`, `LOWER`, `LEFT`, `RIGHT`, `CONCAT`, `REPLACE`, `SUBSTRING`, `CHARINDEX`, `LEN`, `LTRIM`, `RTRIM`, `TRIM`, `REVERSE`, `SPACE`, `REPLICATE`, `STUFF`
+
+```sql
+SELECT UPPER(Name), LEFT(Name, 3), CONCAT(Name, ' - ', Phone), LEN(Name) FROM Students;
+```
+
+#### ب. الدوال الرقمية (Numeric Functions)
+- `ABS`, `ROUND`, `CEILING`, `FLOOR`, `POWER`, `SQRT`, `SIGN`
+
+```sql
+SELECT ABS(-15), ROUND(Grade, 1), SQRT(16), POWER(2, 3);
+```
+
+#### ج. دوال التاريخ والوقت (Date Functions)
+- `GETDATE`, `SYSDATETIME`, `YEAR`, `MONTH`, `DAY`, `DATEPART`, `DATEADD`, `DATEDIFF`, `EOMONTH`
+
+```sql
+SELECT YEAR(GETDATE()), DATEADD(year, 1, '2024-01-01'), DATEDIFF(day, '2024-01-01', '2024-01-10');
+```
+
+#### د. دوال NULL والعمليات الشرطية (NULL & Conditional Functions)
+- `ISNULL`, `COALESCE`, `NULLIF`, `IIF`, `CASE WHEN ... THEN ... ELSE ... END`
+
+```sql
+SELECT
+  ISNULL(Phone, 'No Phone') AS PhoneStr,
+  IIF(Grade >= 60, 'Pass', 'Fail') AS Status,
+  CASE
+    WHEN Grade >= 90 THEN 'Excellent'
+    WHEN Grade >= 60 THEN 'Pass'
+    ELSE 'Fail'
+  END AS GradeLabel
+FROM Students;
+```
+
+#### هـ. الدوال التجميعية (Aggregate Functions)
+- `COUNT`, `SUM`, `MAX`, `MIN`, `AVG`
+
+```sql
+SELECT COUNT(*), AVG(Grade), MAX(Grade), MIN(Grade) FROM Students;
+```
+
+### 5. JOINs (ربط الجداول)
+- `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `FULL OUTER JOIN`, `CROSS JOIN`, `SELF JOIN`
+- دعم Table Aliases (`Students s`, `Departments d`, `Employees e`) والتحقق من الأسماء المزدوجة.
+
+```sql
+-- INNER JOIN with Aliases
+SELECT s.Name AS Student, d.Name AS Department
+FROM Students s
+INNER JOIN Departments d ON s.DepartmentID = d.ID;
+
+-- SELF JOIN
+SELECT e.Name AS Employee, m.Name AS Manager
+FROM Employees e
+LEFT JOIN Employees m ON e.ManagerID = m.ID;
+```
+
+### 6. Subqueries (الاستعلامات الفرعية)
+- Subquery في `WHERE`, `SELECT`, `FROM` (Derived tables).
+- Nested & Multi-level Subqueries.
+- `IN`, `NOT IN`, `EXISTS`, `NOT EXISTS`.
+
+```sql
+-- Scalar Subquery
+SELECT Name FROM Students WHERE Grade > (SELECT AVG(Grade) FROM Students);
+
+-- IN & EXISTS Subquery
+SELECT Name FROM Students WHERE DepartmentID IN (SELECT ID FROM Departments WHERE Name = 'IT');
+
+SELECT s.Name FROM Students s WHERE EXISTS (SELECT 1 FROM Departments d WHERE d.ID = s.DepartmentID);
+
+-- Multi-level Subquery
+SELECT Name FROM Students WHERE DepartmentID = (
+  SELECT ID FROM Departments WHERE Name = (
+    SELECT Name FROM Departments WHERE ID = 1
+  )
+);
+```
+
+### 7. Set Operators (المعاملات المجموعية)
+- `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT` (مع التحقق من تطابق عدد الأعمدة).
+
+```sql
+SELECT Name FROM Students
+UNION
+SELECT Name FROM Teachers;
+
+SELECT Name FROM Students
+EXCEPT
+SELECT Name FROM Teachers;
+```
+
+### 8. Conditions & Operators
+- `IN`, `NOT IN`, `BETWEEN`, `NOT BETWEEN`, `IS NULL`, `IS NOT NULL`, `=`, `<>`, `!=`, `>`, `<`, `>=`, `<=`
+- `AND`, `OR`, `NOT`
 
 ---
 
@@ -98,3 +245,66 @@ sql-student-studio/
 ## 📄 الترخيص (License)
 
 هذا المشروع مرخص بموجب ترخيص [MIT License](LICENSE).
+
+
+## إدارة قواعد البيانات والكتالوجات
+
+يدعم المحرك التعليمي `CREATE DATABASE` و`USE` و`DROP DATABASE` و`DROP DATABASE IF EXISTS`. يمنع حذف قاعدة البيانات المحددة حالياً؛ انتقل أولاً إلى قاعدة أخرى. كما يوفر عرضاً تعليمياً محدوداً من `sys.databases`.
+
+تنبيه: بيانات كتالوجات النظام، بما فيها `database_id`، محاكاة تعليمية وليست قيماً صادرة من Microsoft SQL Server. التطبيق لا يشغّل خدمة SQL Server فعلية.
+
+
+## إدارة المخططات (SCHEMA)
+
+يدعم الإصدار الحالي إنشاء المخططات الفارغة عبر `CREATE SCHEMA`، وعرضها في `sys.schemas`، وحذف المخطط الفارغ عبر `DROP SCHEMA` مع حماية المخطط الافتراضي `dbo`. لا يدعم هذا القسم بعد `ALTER SCHEMA TRANSFER` أو إنشاء/نقل الجداول والعروض داخل مخططات غير `dbo`، كما لا يحاكي ملكية المخططات والصلاحيات.
+
+
+## كتالوجات INFORMATION_SCHEMA الإضافية
+
+أضيف دعم تعليمي لـ `INFORMATION_SCHEMA.KEY_COLUMN_USAGE` و`INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS` لعرض أعمدة المفاتيح الأساسية والفريدة والخارجية، وربط المفتاح الخارجي بالمفتاح المرجعي. قواعد `UPDATE_RULE` و`DELETE_RULE` تعرض `NO ACTION` لأن المحرك لا يطبق إجراءات CASCADE حالياً. تبقى هذه الكتالوجات مجموعة فرعية تعليمية وليست بديلاً عن كتالوج SQL Server الكامل.
+
+
+## أدوات الإدارة التعليمية
+
+أضيف دعم مبسط للقراءة فقط عبر EXEC sp_help وEXEC sp_help 'ObjectName' وEXEC sp_tables مع مرشح @table_name. يعرض المحرك مجموعة نتائج واحدة مبسطة للجداول والعروض وأعمدتها؛ لا يدّعي مطابقة جميع مجموعات النتائج أو خيارات الإجراءات المخزنة الأصلية في SQL Server.
+
+
+تنبيه الفهارس: يحتفظ المحرك بتعريفات الفهارس ويطبق قيود التفرد عند INSERT وUPDATE، ويعرض بياناتها في كتالوجات النظام. لا يوجد حتى الآن Query Planner أو بنية B-Tree/بحث فعلي عبر الفهارس؛ لذلك لا تُقدَّم كتحسين أداء للاستعلامات.
+
+
+تدعم العروض أيضاً الصيغة `CREATE OR ALTER VIEW` لإنشاء العرض أو استبدال تعريفه مع الحفاظ على التعريف السابق عند فشل التحقق. لا يدعم المحرك `WITH SCHEMABINDING` أو التبعيات والصلاحيات الأصلية الكاملة للعروض.
+
+
+## حدود الأمان والصلاحيات
+
+لا يطبق هذا المشروع مصادقة SQL Server أو إدارة LOGIN/USER/ROLE أو أوامر GRANT/DENY/REVOKE. يرفض المحرك هذه الأوامر برسالة واضحة. التطبيق مساحة تدريب محلية، وليس خادماً متعدد المستخدمين ولا حدّاً أمنياً؛ لا تستخدم محاكاة الأوامر كوسيلة لحماية بيانات حقيقية.
+
+
+## مصفوفة الدعم والقيود الحالية
+
+المحرك مستقل ومكتوب بـ TypeScript ويخزن مساحة العمل محلياً. العناصر أدناه تصف نطاق التنفيذ الحالي، لا توافقاً كاملاً مع Microsoft SQL Server.
+
+| المجال | المتاح في النسخة التعليمية | الحد المعروف |
+|---|---|---|
+| قواعد البيانات | `CREATE DATABASE` و`USE` و`DROP DATABASE` و`DROP DATABASE IF EXISTS` و`sys.databases` | بيانات الكتالوج و`database_id` محاكاة محلية |
+| الجداول والقيود | إنشاء/حذف/تعديل الجداول، `TRUNCATE`، وقيود PK وUNIQUE وFK وCHECK وDEFAULT | لا تُنفَّذ كل صيغ T-SQL أو كل أنواع البيانات والقيود |
+| الهوية | `IDENTITY(seed, increment)` و`SET IDENTITY_INSERT` و`DBCC CHECKIDENT` بصيغ تعليمية محددة | لا يطابق كل حالات SQL Server الحدّية أو خياراته |
+| الفهارس | `CREATE INDEX` و`CREATE UNIQUE INDEX` و`DROP INDEX`، مع فرض التفرد وعرض بياناتها | لا توجد B-Tree أو Query Planner أو عملية بحث فعلية عبر الفهرس؛ لا يوجد وعد بتحسين الأداء |
+| العروض | `CREATE VIEW` و`ALTER VIEW` و`CREATE OR ALTER VIEW` و`DROP VIEW`، مع إعادة تنفيذ التعريف عند الاستعلام | لا يدعم `WITH SCHEMABINDING` أو كامل قواعد التبعيات والصلاحيات |
+| المخططات | إنشاء مخططات فارغة وعرضها وحذفها إذا كانت فارغة؛ حماية `dbo` | لا يدعم نقل الكائنات عبر `ALTER SCHEMA TRANSFER` أو وضع الجداول والعروض في مخططات غير `dbo` |
+| كتالوجات البيانات | مجموعة من `sys.*` و`INFORMATION_SCHEMA.*` تشمل الجداول والأعمدة والقيود والفهارس والعروض | بيانات وصفية تعليمية؛ ليست كل الأعمدة أو الدلالات الأصلية |
+| أدوات الإدارة | مجموعة نتائج مبسطة للقراءة فقط عبر `sp_help` و`sp_tables` | ليست الإجراءات المخزنة الأصلية بكل خياراتها ومجموعات نتائجها |
+| المعاملات | `BEGIN TRANSACTION` و`COMMIT` و`ROLLBACK` والتراجع التلقائي عند الخطأ أو غياب COMMIT | لا توجد معاملات متداخلة أو محرك معاملات متعدد الجلسات |
+| الصلاحيات | رفض صريح لأوامر LOGIN/USER/ROLE/GRANT/DENY/REVOKE غير المنفذة | لا توجد مصادقة أو أدوار أو عزل أمني متعدد المستخدمين |
+
+### ما لا يمثله التطبيق
+
+- ليس خادماً لـ SQL Server ولا يتصل بقاعدة SQL Server فعلية.
+- لا يوفر النسخ الاحتياطي والاستعادة بصيغة SQL Server، ولا سجل معاملات أو استرداداً بعد الأعطال.
+- لا يوفر مصادقة أو صلاحيات أو عزلاً أمنياً بين مستخدمين.
+- لا يضمن التوافق الكامل مع T-SQL؛ يجب اختبار أي أمر خارج النطاق الموثق قبل الاعتماد عليه.
+- لا ينبغي استخدامه لتخزين بيانات حساسة أو لتشغيل أنظمة إنتاجية.
+
+### بناء APK عبر GitHub Actions
+
+ملف سير العمل [build-apk.yml](.github/workflows/build-apk.yml) يشغّل فحص TypeScript والاختبارات ثم ينشئ مشروع Android ويجمع Release APK. بعد نجاح خطوة رفع Artifact يظهر ملف باسم `sql-student-studio-apk` في صفحة تشغيل GitHub Actions، ويكون متاحاً وفق مدة الاحتفاظ المحددة في ملف سير العمل.

@@ -38,11 +38,11 @@ export function SectionLabel({ children, action }: { children: string; action?: 
   );
 }
 
-export function IconButton({ icon, onPress, label, tone = 'secondary' }: { icon: keyof typeof Feather.glyphMap; onPress: () => void; label?: string; tone?: 'primary' | 'secondary' }) {
+export function IconButton({ icon, onPress, label, tone = 'secondary', disabled = false }: { icon: keyof typeof Feather.glyphMap; onPress: () => void; label?: string; tone?: 'primary' | 'secondary'; disabled?: boolean }) {
   const colors = useColors();
   const primary = tone === 'primary';
   return (
-    <Pressable testID={label} accessibilityLabel={label} onPress={onPress} style={({ pressed }) => [styles.iconButton, { backgroundColor: primary ? colors.primary : colors.secondary, opacity: pressed ? 0.72 : 1 }]}>
+    <Pressable testID={label} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.iconButton, { backgroundColor: primary ? colors.primary : colors.secondary, opacity: disabled ? 0.42 : pressed ? 0.72 : 1 }]}>
       <Feather name={icon} size={17} color={primary ? colors.primaryForeground : colors.secondaryForeground} />
       {label && <Text style={[styles.iconButtonText, { color: primary ? colors.primaryForeground : colors.secondaryForeground }]}>{label}</Text>}
     </Pressable>
@@ -62,8 +62,9 @@ export function StatCard({ icon, value, label, accent }: { icon: keyof typeof Fe
   );
 }
 
-export function ResultPanel({ result, emptyLabel }: { result: ExecutionResult | null; emptyLabel: string }) {
+export function ResultPanel({ result, emptyLabel, locale = 'en' }: { result: ExecutionResult | null; emptyLabel: string; locale?: 'ar' | 'en' }) {
   const colors = useColors();
+  const isArabic = locale === 'ar';
   if (!result) {
     return (
       <View style={[styles.emptyPanel, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -78,11 +79,11 @@ export function ResultPanel({ result, emptyLabel }: { result: ExecutionResult | 
       <View style={styles.resultHeader}>
         <View style={styles.resultTitleRow}>
           <Feather name={hasError ? 'alert-circle' : 'check-circle'} size={17} color={hasError ? colors.destructive : colors.primary} />
-          <Text style={[styles.resultTitle, { color: colors.foreground }]}>{hasError ? 'Execution error' : 'Execution result'}</Text>
+          <Text style={[styles.resultTitle, { color: colors.foreground }]}>{hasError ? (isArabic ? 'خطأ في التنفيذ' : 'Execution error') : (isArabic ? 'نتيجة التنفيذ' : 'Execution result')}</Text>
         </View>
         <Text style={[styles.duration, { color: colors.mutedForeground }]}>{result.durationMs} ms</Text>
       </View>
-      {result.errors.map((error) => <Text key={error} style={[styles.errorText, { color: colors.destructive }]}>{error}</Text>)}
+      {result.errors.map((error, index) => <Text key={index} style={[styles.errorText, { color: colors.destructive }]}>{error}</Text>)}
       {!hasError && result.columns.length > 0 && (
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           <View>
@@ -97,7 +98,7 @@ export function ResultPanel({ result, emptyLabel }: { result: ExecutionResult | 
           </View>
         </ScrollView>
       )}
-      {result.messages.map((message) => <Text key={message} style={[styles.messageText, { color: colors.mutedForeground }]}>{message}</Text>)}
+      {result.messages.map((message, index) => <Text key={index} style={[styles.messageText, { color: colors.mutedForeground }]}>{message}</Text>)}
     </View>
   );
 }
