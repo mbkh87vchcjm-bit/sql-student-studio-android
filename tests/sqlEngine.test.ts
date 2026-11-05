@@ -74,15 +74,20 @@ USE TestDB;`
   assert.strictEqual(res.result.affectedRows, 1);
   state = res.state;
 
-  // 7. DROP TABLE & DATABASE
+  // 7. DROP TABLE, switch databases, then drop the inactive database.
   res = executeScript(
     state,
     `DROP TABLE Users;
 GO
+CREATE DATABASE AdminDB;
+GO
+USE AdminDB;
+GO
 DROP DATABASE TestDB;`
   );
   assert.strictEqual(res.result.errors.length, 0);
-  assert.strictEqual(res.state.currentDatabase, null);
+  assert.strictEqual(res.state.currentDatabase, 'AdminDB');
+  assert.strictEqual(Boolean(res.state.databases.testdb), false);
 });
 
 test('INSERT Atomicity: Failed row aborts whole statement', () => {
