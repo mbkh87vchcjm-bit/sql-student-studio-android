@@ -1252,8 +1252,43 @@ function informationSchemaData(sourceName: string, database: DatabaseModel): Vir
  * Simplified SQL Server-style sys catalog. Object IDs are stable simulator IDs,
  * not native SQL Server object IDs; all objects use the simulated dbo schema.
  */
-function systemCatalogData(sourceName: string, database: DatabaseModel): VirtualCatalogData | null {
+function systemCatalogData(
+  sourceName: string,
+  database: DatabaseModel,
+  engineState?: EngineState
+): VirtualCatalogData | null {
   const source = keyOf(sourceName);
+
+  if (source === 'sys.databases') {
+    const databaseNames = Object.values(engineState?.databases ?? {})
+      .sort((left, right) => keyOf(left.name).localeCompare(keyOf(right.name)));
+    return {
+      columns: [
+        'name',
+        'database_id',
+        'create_date',
+        'collation_name',
+        'state',
+        'state_desc',
+        'user_access',
+        'user_access_desc',
+        'is_read_only',
+      ],
+      rows: databaseNames.map((item, index) => ({
+        name: item.name,
+        // Synthetic IDs are for education only; they are not SQL Server database IDs.
+        database_id: index + 5,
+        create_date: null,
+        collation_name: null,
+        state: 0,
+        state_desc: 'ONLINE',
+        user_access: 0,
+        user_access_desc: 'MULTI_USER',
+        is_read_only: 0,
+      })),
+    };
+  }
+
   const tables = Object.values(database.tables);
   const views = Object.values(database.views ?? {});
   const objects = [
@@ -1559,7 +1594,7 @@ function parseTableSource(
   const alias = cleanName(parts[1] || parts[0]);
   const sourceId = `tbl_${sourceIndex}_${alias}`;
 
-  const catalogData = informationSchemaData(tableName, database) ?? systemCatalogData(tableName, database);
+  const catalogData = informationSchemaData(tableName, database) ?? systemCatalogData(tableName, database, engineState);
   if (catalogData) {
     const rows: StoredRow[] = catalogData.rows.map((record) => {
       const obj: StoredRow = {};
@@ -2393,23 +2428,37 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: [`تم إنشاء قاعدة البيانات ${name}.`] });
   }
 
-  // 2. DROP DATABASE
-  match = sql.match(/^DROP\s+DATABASE\s+([[\]\w-]+)$/i);
+  // 2. DROP DATABASE [IF EXISTS]
+  match = sql.match(/^DROP\s+DATABASE\s+(IF\s+EXISTS\s+)?([[\\]\w-]+)$/i);
   if (match) {
-    const name = cleanName(match[1]);
-    if (!state.databases[keyOf(name)]) return errorResult(state, start, `قاعدة البيانات "${name}" غير موجودة.`);
-    delete state.databases[keyOf(name)];
-    if (keyOf(state.currentDatabase ?? '') === keyOf(name)) state.currentDatabase = null;
-    return success(state, start, { messages: [`تم حذف قاعدة البيانات ${name}.`] });
+    const ifExists = Boolean(match[1]);
+    const name = cleanName(match[2]);
+    const databaseKey = keyOf(name);
+    const targetDatabase = state.databases[databaseKey];
+
+    if (!targetDatabase) {
+      return ifExists
+        ? success(state, start, { messages: ['قاعدة البيانات "' + name + '" غير موجودة؛ لم يحدث أي تغيير.'] })
+        : errorResult(state, start, 'قاعدة البيانات "' + name + '" غير موجودة.');
+    }
+
+    // SQL Server does not allow dropping the database used by the current session.
+    if (keyOf(state.currentDatabase ?? '') === databaseKey) {
+      return errorResult(state, start, 'لا يمكن حذف قاعدة البيانات الحالية "' + targetDatabase.name + '". نفّذ USE على قاعدة بيانات أخرى أولاً.');
+    }
+
+    delete state.databases[databaseKey];
+    return success(state, start, { messages: ['تم حذف قاعدة البيانات ' + targetDatabase.name + '.'] });
   }
 
   // 3. USE DATABASE
-  match = sql.match(/^USE\s+([[\]\w-]+)$/i);
+  match = sql.match(/^USE\s+([[\\]\w-]+)$/i);
   if (match) {
     const name = cleanName(match[1]);
-    if (!state.databases[keyOf(name)]) return errorResult(state, start, `قاعدة البيانات "${name}" غير موجودة.`);
-    state.currentDatabase = name;
-    return success(state, start, { messages: [`قاعدة البيانات الحالية: ${name}.`] });
+    const targetDatabase = state.databases[keyOf(name)];
+    if (!targetDatabase) return errorResult(state, start, 'قاعدة البيانات "' + name + '" غير موجودة.');
+    state.currentDatabase = targetDatabase.name;
+    return success(state, start, { messages: ['قاعدة البيانات الحالية: ' + targetDatabase.name + '.'] });
   }
 
   const database = databaseFor(state);

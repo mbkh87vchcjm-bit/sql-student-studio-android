@@ -245,3 +245,10 @@ sql-student-studio/
 ## 📄 الترخيص (License)
 
 هذا المشروع مرخص بموجب ترخيص [MIT License](LICENSE).
+
+
+## إدارة قواعد البيانات والكتالوجات
+
+يدعم المحرك التعليمي `CREATE DATABASE` و`USE` و`DROP DATABASE` و`DROP DATABASE IF EXISTS`. يمنع حذف قاعدة البيانات المحددة حالياً؛ انتقل أولاً إلى قاعدة أخرى. كما يوفر عرضاً تعليمياً محدوداً من `sys.databases`.
+
+تنبيه: بيانات كتالوجات النظام، بما فيها `database_id`، محاكاة تعليمية وليست قيماً صادرة من Microsoft SQL Server. التطبيق لا يشغّل خدمة SQL Server فعلية.

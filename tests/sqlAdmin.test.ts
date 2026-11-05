@@ -1153,3 +1153,59 @@ test('sys.key_constraints distinguishes primary-key and unique constraints', () 
     ['UQ_Users_1', 'UQ', 'UNIQUE_CONSTRAINT'],
   ]);
 });
+
+
+test('DATABASE lifecycle supports case-insensitive USE, protects the active database, and supports DROP IF EXISTS', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    'CREATE DATABASE MainDB; CREATE DATABASE ArchiveDB;'
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.deepStrictEqual(
+    Object.keys(created.state.databases).sort(),
+    ['archivedb', 'maindb']
+  );
+
+  const selected = executeScript(created.state, 'USE maindb;');
+  assert.deepStrictEqual(selected.result.errors, []);
+  assert.strictEqual(selected.state.currentDatabase, 'MainDB');
+
+  const blockedDrop = executeScript(selected.state, 'DROP DATABASE MainDB;');
+  assert.ok(blockedDrop.result.errors.length > 0);
+  assert.match(blockedDrop.result.errors[0], /قاعدة البيانات الحالية/);
+  assert.ok(blockedDrop.state.databases.maindb);
+
+  const switched = executeScript(blockedDrop.state, 'USE ArchiveDB;');
+  assert.deepStrictEqual(switched.result.errors, []);
+  const dropped = executeScript(switched.state, 'DROP DATABASE MainDB;');
+  assert.deepStrictEqual(dropped.result.errors, []);
+  assert.strictEqual(Boolean(dropped.state.databases.maindb), false);
+  assert.strictEqual(dropped.state.currentDatabase, 'ArchiveDB');
+
+  const missingIfExists = executeScript(dropped.state, 'DROP DATABASE IF EXISTS MissingDB;');
+  assert.deepStrictEqual(missingIfExists.result.errors, []);
+  assert.ok(missingIfExists.result.messages.some((message) => /لم يحدث أي تغيير/.test(message)));
+
+  const missingStrict = executeScript(dropped.state, 'DROP DATABASE MissingDB;');
+  assert.ok(missingStrict.result.errors.length > 0);
+  assert.match(missingStrict.result.errors[0], /غير موجودة/);
+});
+
+test('sys.databases lists simulated databases and documents online/access metadata', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    'CREATE DATABASE BetaDB; CREATE DATABASE AlphaDB; USE BetaDB;'
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(
+    created.state,
+    'SELECT name, database_id, state_desc, user_access_desc, is_read_only FROM sys.databases ORDER BY name;'
+  );
+
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['AlphaDB', '5', 'ONLINE', 'MULTI_USER', '0'],
+    ['BetaDB', '6', 'ONLINE', 'MULTI_USER', '0'],
+  ]);
+});
