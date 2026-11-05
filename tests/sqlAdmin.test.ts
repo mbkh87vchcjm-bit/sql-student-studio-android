@@ -1450,3 +1450,40 @@ test('IDENTITY_INSERT advances the counter for higher explicit values and respec
   assert.deepStrictEqual(selected.result.rows, [['1'], ['2'], ['50'], ['51']]);
   assert.strictEqual(explicit.state.databases.identityinsertdb.tables.jobs.columns[0].identity?.lastValue, 51);
 });
+
+
+test('sys.key_constraints unique_index_id matches sys.indexes for mixed column and table UNIQUE constraints', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IndexOrderDB;\nUSE IndexOrderDB;\nCREATE TABLE IndexOrder (\n  Id INT PRIMARY KEY,\n  TenantId INT NOT NULL,\n  Code INT NOT NULL,\n  Email NVARCHAR(30) UNIQUE,\n  CONSTRAINT UQ_IndexOrder_Tenant_Code UNIQUE (TenantId, Code)\n);"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(
+    created.state,
+    "SELECT i.name, i.index_id, k.name, k.unique_index_id FROM sys.indexes i INNER JOIN sys.key_constraints k ON i.object_id = k.parent_object_id AND i.index_id = k.unique_index_id ORDER BY i.index_id;"
+  );
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['PK_IndexOrder', '1', 'PK_IndexOrder', '1'],
+    ['UQ_IndexOrder_1', '2', 'UQ_IndexOrder_1', '2'],
+    ['UQ_IndexOrder_Email', '3', 'UQ_IndexOrder_Email', '3'],
+  ]);
+});
+
+test('CREATE INDEX rejects names already reserved by primary and unique constraints', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IndexNameDB;\nUSE IndexNameDB;\nCREATE TABLE Products (Id INT PRIMARY KEY, Email NVARCHAR(30) UNIQUE, CategoryId INT);"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const primaryCollision = executeScript(created.state, 'CREATE INDEX PK_Products ON Products (CategoryId);');
+  assert.ok(primaryCollision.result.errors.length > 0);
+  assert.match(primaryCollision.result.errors[0], /مستخدم بالفعل/);
+
+  const uniqueCollision = executeScript(created.state, 'CREATE INDEX UQ_Products_Email ON Products (CategoryId);');
+  assert.ok(uniqueCollision.result.errors.length > 0);
+  assert.match(uniqueCollision.result.errors[0], /مستخدم بالفعل/);
+  assert.strictEqual(uniqueCollision.state.databases.indexnamedb.tables.products.indexes, undefined);
+});

@@ -1603,14 +1603,6 @@ function systemCatalogData(
           unique_index_id: indexId++,
         });
       }
-      for (const column of table.columns.filter((item) => item.unique)) rows.push({
-        name: 'UQ_' + table.name + '_' + column.name,
-        object_id: idFor(table.name),
-        parent_object_id: idFor(table.name),
-        type: 'UQ',
-        type_desc: 'UNIQUE_CONSTRAINT',
-        unique_index_id: indexId++,
-      });
       (table.uniqueConstraints ?? []).forEach((constraint, index) => rows.push({
         name: 'UQ_' + table.name + '_' + (index + 1),
         object_id: idFor(table.name),
@@ -1619,6 +1611,14 @@ function systemCatalogData(
         type_desc: 'UNIQUE_CONSTRAINT',
         unique_index_id: indexId++,
       }));
+      for (const column of table.columns.filter((item) => item.unique)) rows.push({
+        name: 'UQ_' + table.name + '_' + column.name,
+        object_id: idFor(table.name),
+        parent_object_id: idFor(table.name),
+        type: 'UQ',
+        type_desc: 'UNIQUE_CONSTRAINT',
+        unique_index_id: indexId++,
+      });
     }
     return { columns, rows };
   }
@@ -3106,8 +3106,17 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (missingColumn) return errorResult(state, start, 'عمود الفهرس "' + missingColumn + '" غير موجود في الجدول "' + tableName + '".');
 
     const indexes = table.indexes ?? [];
-    if (indexes.some((index) => keyOf(index.name) === keyOf(indexName))) {
-      return errorResult(state, start, 'الفهرس "' + indexName + '" موجود بالفعل في الجدول "' + tableName + '".');
+    const primaryKeyColumns = table.primaryKeyColumns?.length
+      ? table.primaryKeyColumns
+      : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+    const reservedIndexNames = [
+      ...(primaryKeyColumns.length ? ['PK_' + table.name] : []),
+      ...(table.uniqueConstraints ?? []).map((_, index) => 'UQ_' + table.name + '_' + (index + 1)),
+      ...table.columns.filter((column) => column.unique).map((column) => 'UQ_' + table.name + '_' + column.name),
+      ...indexes.map((index) => index.name),
+    ];
+    if (reservedIndexNames.some((reservedName) => keyOf(reservedName) === keyOf(indexName))) {
+      return errorResult(state, start, 'اسم الفهرس "' + indexName + '" مستخدم بالفعل لفهرس أو قيد UNIQUE في الجدول "' + tableName + '".');
     }
 
     const candidateTable: TableModel = {
