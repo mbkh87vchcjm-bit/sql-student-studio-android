@@ -41,6 +41,8 @@ export interface IndexModel {
 
 export interface TableModel {
   name: string;
+  /** Optional schema name; legacy objects without it belong to dbo. */
+  schema?: string;
   columns: ColumnModel[];
   rows: StoredRow[];
   /** Optional for backward compatibility with previously saved workspaces. */
@@ -57,15 +59,24 @@ export interface TableModel {
 
 export interface ViewModel {
   name: string;
+  /** Optional schema name; legacy views without it belong to dbo. */
+  schema?: string;
   /** The SELECT definition is re-evaluated whenever the view is queried. */
   definition: string;
   /** Cached output column names for INFORMATION_SCHEMA metadata. */
   columns?: string[];
 }
 
+export interface SchemaModel {
+  name: string;
+  /** Schema ownership is intentionally not modeled in this educational engine. */
+}
+
 export interface DatabaseModel {
   name: string;
   tables: Record<string, TableModel>;
+  /** Additional empty schemas; dbo exists implicitly for backward compatibility. */
+  schemas?: Record<string, SchemaModel>;
   /** Optional for backward compatibility with saved databases from older versions. */
   views?: Record<string, ViewModel>;
 }
@@ -1300,7 +1311,17 @@ function systemCatalogData(
   const objectColumns = ['object_id', 'name', 'schema_id', 'type', 'type_desc', 'is_ms_shipped'];
 
   if (source === 'sys.schemas') {
-    return { columns: ['schema_id', 'name'], rows: [{ schema_id: 1, name: 'dbo' }] };
+    const schemaNames = [
+      'dbo',
+      ...Object.values(database.schemas ?? {})
+        .map((schema) => schema.name)
+        .filter((name) => keyOf(name) !== 'dbo')
+        .sort((left, right) => keyOf(left).localeCompare(keyOf(right))),
+    ];
+    return {
+      columns: ['schema_id', 'name'],
+      rows: schemaNames.map((name, index) => ({ schema_id: index + 1, name })),
+    };
   }
 
   if (source === 'sys.objects' || source === 'sys.tables' || source === 'sys.views') {
@@ -2463,6 +2484,48 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
 
   const database = databaseFor(state);
   if (!database) return errorResult(state, start, 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.');
+
+  // CREATE SCHEMA: this stage registers empty schemas; object placement/transfer is a later capability.
+  match = sql.match(/^CREATE\s+SCHEMA\s+([[\]\w-]+)$/i);
+  if (match) {
+    const schemaName = cleanName(match[1]);
+    const schemaKey = keyOf(schemaName);
+    if (schemaKey === 'dbo' || database.schemas?.[schemaKey]) {
+      return errorResult(state, start, 'المخطط "' + schemaName + '" موجود بالفعل.');
+    }
+    database.schemas ??= {};
+    database.schemas[schemaKey] = { name: schemaName };
+    return success(state, start, { messages: ['تم إنشاء المخطط الفارغ "' + schemaName + '".'] });
+  }
+
+  // DROP SCHEMA [IF EXISTS]: dbo is a permanent default schema.
+  match = sql.match(/^DROP\s+SCHEMA\s+(IF\s+EXISTS\s+)?([[\]\w-]+)$/i);
+  if (match) {
+    const ifExists = Boolean(match[1]);
+    const schemaName = cleanName(match[2]);
+    const schemaKey = keyOf(schemaName);
+    const schema = schemaKey === 'dbo' ? { name: 'dbo' } : database.schemas?.[schemaKey];
+    if (!schema) {
+      return ifExists
+        ? success(state, start, { messages: ['المخطط "' + schemaName + '" غير موجود؛ لم يحدث أي تغيير.'] })
+        : errorResult(state, start, 'المخطط "' + schemaName + '" غير موجود.');
+    }
+    if (schemaKey === 'dbo') {
+      return errorResult(state, start, 'لا يمكن حذف المخطط الافتراضي dbo.');
+    }
+    const ownsTable = Object.values(database.tables).some((table) => keyOf(table.schema ?? 'dbo') === schemaKey);
+    const ownsView = Object.values(database.views ?? {}).some((view) => keyOf(view.schema ?? 'dbo') === schemaKey);
+    if (ownsTable || ownsView) {
+      return errorResult(state, start, 'لا يمكن حذف المخطط "' + schemaName + '" لأنه يحتوي على كائنات.');
+    }
+    delete database.schemas![schemaKey];
+    if (Object.keys(database.schemas!).length === 0) delete database.schemas;
+    return success(state, start, { messages: ['تم حذف المخطط "' + schema.name + '".'] });
+  }
+
+  if (/^ALTER\s+SCHEMA\b/i.test(sql)) {
+    return errorResult(state, start, 'ALTER SCHEMA TRANSFER غير مدعوم بعد؛ نقل الجداول والعروض بين المخططات لم يُنفذ في هذا الإصدار.');
+  }
 
   // CREATE / ALTER VIEW: persist a validated SELECT definition, not a snapshot of rows.
   match = sql.match(/^CREATE\s+VIEW\s+([\[\]\w.-]+)\s+AS\s+([\s\S]+)$/i);

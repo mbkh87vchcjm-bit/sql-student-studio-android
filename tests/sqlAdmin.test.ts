@@ -1226,3 +1226,48 @@ test('DATABASE commands accept bracket-delimited identifiers', () => {
   assert.strictEqual(Boolean(dropped.state.databases.labdb), false);
   assert.strictEqual(dropped.state.currentDatabase, 'MaintenanceDB');
 });
+
+
+test('CREATE SCHEMA registers non-dbo schemas and DROP SCHEMA removes only empty schemas', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    'CREATE DATABASE SchemaDB; USE SchemaDB; CREATE SCHEMA Sales; CREATE SCHEMA [Analytics];'
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const listed = executeScript(
+    created.state,
+    'SELECT schema_id, name FROM sys.schemas ORDER BY schema_id;'
+  );
+  assert.deepStrictEqual(listed.result.errors, []);
+  assert.deepStrictEqual(listed.result.rows, [
+    ['1', 'dbo'],
+    ['2', 'Analytics'],
+    ['3', 'Sales'],
+  ]);
+
+  const duplicate = executeScript(created.state, 'CREATE SCHEMA sales;');
+  assert.ok(duplicate.result.errors.length > 0);
+  assert.match(duplicate.result.errors[0], /موجود بالفعل/);
+
+  const dropDbo = executeScript(created.state, 'DROP SCHEMA dbo;');
+  assert.ok(dropDbo.result.errors.length > 0);
+  assert.match(dropDbo.result.errors[0], /dbo/);
+
+  const dropped = executeScript(created.state, 'DROP SCHEMA Sales;');
+  assert.deepStrictEqual(dropped.result.errors, []);
+  const afterDrop = executeScript(dropped.state, 'SELECT name FROM sys.schemas ORDER BY name;');
+  assert.deepStrictEqual(afterDrop.result.errors, []);
+  assert.deepStrictEqual(afterDrop.result.rows, [['Analytics'], ['dbo']]);
+
+  const missingIfExists = executeScript(dropped.state, 'DROP SCHEMA IF EXISTS MissingSchema;');
+  assert.deepStrictEqual(missingIfExists.result.errors, []);
+});
+
+test('ALTER SCHEMA TRANSFER reports its current implementation limit explicitly', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SchemaTransferDB; USE SchemaTransferDB; CREATE SCHEMA Sales;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const transfer = executeScript(created.state, 'ALTER SCHEMA Sales TRANSFER dbo.Orders;');
+  assert.ok(transfer.result.errors.length > 0);
+  assert.match(transfer.result.errors[0], /غير مدعوم بعد/);
+});
