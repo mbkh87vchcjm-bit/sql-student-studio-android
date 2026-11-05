@@ -2597,6 +2597,11 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     }
 
     delete state.databases[databaseKey];
+    // Clear session state that would otherwise point to an object in the deleted database.
+    if (state.identityInsertTable?.startsWith(targetDatabase.name + '.')
+      || keyOf(state.identityInsertTable ?? '').startsWith(databaseKey + '.')) {
+      state.identityInsertTable = null;
+    }
     return success(state, start, { messages: ['تم حذف قاعدة البيانات ' + targetDatabase.name + '.'] });
   }
 
@@ -3212,6 +3217,9 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       return errorResult(state, start, 'لا يمكن حذف الجدول "' + name + '" لأنه مرجع في قيد FOREIGN KEY داخل الجدول "' + dependency.name + '".');
     }
     delete database.tables[keyOf(name)];
+    // Do not leave IDENTITY_INSERT enabled for a table that no longer exists.
+    const identityKey = keyOf(database.name + '.' + name);
+    if (keyOf(state.identityInsertTable ?? '') === identityKey) state.identityInsertTable = null;
     return success(state, start, { messages: [`تم حذف الجدول ${name}.`] });
   }
 

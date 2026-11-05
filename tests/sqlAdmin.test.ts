@@ -1543,3 +1543,63 @@ test('SQL Server security commands are rejected explicitly because the simulator
     assert.strictEqual(rejected.state.databases.securityboundarydb.tables.students.rows.length, 0);
   }
 });
+
+
+test('DROP TABLE clears session IDENTITY_INSERT so a recreated table requires explicit re-enablement', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityDropTableDB;\nUSE IdentityDropTableDB;\nCREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Name NVARCHAR(20));\nSET IDENTITY_INSERT Jobs ON;\nDROP TABLE Jobs;\nCREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Name NVARCHAR(20));"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.identityInsertTable, null);
+
+  const explicit = executeScript(created.state, "INSERT INTO Jobs (Id, Name) VALUES (10, 'Ten');");
+  assert.ok(explicit.result.errors.length > 0);
+  assert.match(explicit.result.errors[0], /SET IDENTITY_INSERT/);
+
+  const enabled = executeScript(explicit.state, "SET IDENTITY_INSERT Jobs ON;\nINSERT INTO Jobs (Id, Name) VALUES (10, 'Ten');");
+  assert.deepStrictEqual(enabled.result.errors, []);
+});
+
+test('DROP DATABASE clears IDENTITY_INSERT session state belonging to the dropped database', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityDropDB;\nUSE IdentityDropDB;\nCREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Name NVARCHAR(20));\nSET IDENTITY_INSERT Jobs ON;\nCREATE DATABASE IdentitySwitchDB;\nUSE IdentitySwitchDB;\nDROP DATABASE IdentityDropDB;"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.identityInsertTable, null);
+
+  const ready = executeScript(
+    created.state,
+    "CREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Name NVARCHAR(20));\nSET IDENTITY_INSERT Jobs ON;\nINSERT INTO Jobs (Id, Name) VALUES (20, 'Twenty');"
+  );
+  assert.deepStrictEqual(ready.result.errors, []);
+  assert.deepStrictEqual(ready.result.rows, []);
+});
+
+test('ROLLBACK restores identity counter and IDENTITY_INSERT session state', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityRollbackDB;\nUSE IdentityRollbackDB;\nCREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Name NVARCHAR(20));\nINSERT INTO Jobs (Name) VALUES ('Before');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const rolledBack = executeScript(
+    created.state,
+    "BEGIN TRANSACTION;\nSET IDENTITY_INSERT Jobs ON;\nINSERT INTO Jobs (Id, Name) VALUES (40, 'Temporary');\nROLLBACK;"
+  );
+  assert.deepStrictEqual(rolledBack.result.errors, []);
+  assert.strictEqual(rolledBack.state.identityInsertTable ?? null, null);
+  assert.deepStrictEqual(rolledBack.state.databases.identityrollbackdb.tables.jobs.rows, [{ Id: 1, Name: 'Before' }]);
+  assert.strictEqual(rolledBack.state.databases.identityrollbackdb.tables.jobs.columns[0].identity?.nextValue, 2);
+
+  const explicit = executeScript(rolledBack.state, "INSERT INTO Jobs (Id, Name) VALUES (50, 'ShouldFail');");
+  assert.ok(explicit.result.errors.length > 0);
+  const next = executeScript(explicit.state, "INSERT INTO Jobs (Name) VALUES ('After');");
+  assert.deepStrictEqual(next.result.errors, []);
+  assert.deepStrictEqual(next.result.rows, []);
+  assert.deepStrictEqual(next.state.databases.identityrollbackdb.tables.jobs.rows, [
+    { Id: 1, Name: 'Before' },
+    { Id: 2, Name: 'After' },
+  ]);
+});
