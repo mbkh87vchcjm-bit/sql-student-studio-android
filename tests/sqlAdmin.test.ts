@@ -1271,3 +1271,66 @@ test('ALTER SCHEMA TRANSFER reports its current implementation limit explicitly'
   assert.ok(transfer.result.errors.length > 0);
   assert.match(transfer.result.errors[0], /غير مدعوم بعد/);
 });
+
+
+test('INFORMATION_SCHEMA.KEY_COLUMN_USAGE lists primary, unique, and foreign-key columns in key order', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE KeyUsageDB;
+USE KeyUsageDB;
+CREATE TABLE Departments (
+  Id INT PRIMARY KEY,
+  Code NVARCHAR(12) UNIQUE
+);
+CREATE TABLE Students (
+  Id INT PRIMARY KEY,
+  DepartmentCode NVARCHAR(12),
+  CONSTRAINT FK_Students_DepartmentCode FOREIGN KEY (DepartmentCode)
+    REFERENCES Departments(Code)
+);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(
+    created.state,
+    `SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, POSITION_IN_UNIQUE_CONSTRAINT
+     FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+     ORDER BY CONSTRAINT_NAME;`
+  );
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['FK_Students_DepartmentCode', 'Students', 'DepartmentCode', '1', '1'],
+    ['PK_Departments', 'Departments', 'Id', '1', 'NULL'],
+    ['PK_Students', 'Students', 'Id', '1', 'NULL'],
+    ['UQ_Departments_Code', 'Departments', 'Code', '1', 'NULL'],
+  ]);
+});
+
+test('INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS resolves the referenced unique key and NO ACTION rules', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE ReferentialDB;
+USE ReferentialDB;
+CREATE TABLE Departments (
+  Id INT PRIMARY KEY,
+  Code NVARCHAR(12) UNIQUE
+);
+CREATE TABLE Students (
+  Id INT PRIMARY KEY,
+  DepartmentCode NVARCHAR(12),
+  CONSTRAINT FK_Students_DepartmentCode FOREIGN KEY (DepartmentCode)
+    REFERENCES Departments(Code)
+);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(
+    created.state,
+    `SELECT CONSTRAINT_NAME, UNIQUE_CONSTRAINT_NAME, MATCH_OPTION, UPDATE_RULE, DELETE_RULE
+     FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS;`
+  );
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['FK_Students_DepartmentCode', 'UQ_Departments_Code', 'SIMPLE', 'NO ACTION', 'NO ACTION'],
+  ]);
+});

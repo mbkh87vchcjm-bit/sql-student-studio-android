@@ -1234,6 +1234,125 @@ function informationSchemaData(sourceName: string, database: DatabaseModel): Vir
     return { columns, rows };
   }
 
+  if (objectName === 'information_schema.key_column_usage') {
+    const columns = [
+      'CONSTRAINT_CATALOG',
+      'CONSTRAINT_SCHEMA',
+      'CONSTRAINT_NAME',
+      'TABLE_CATALOG',
+      'TABLE_SCHEMA',
+      'TABLE_NAME',
+      'COLUMN_NAME',
+      'ORDINAL_POSITION',
+      'POSITION_IN_UNIQUE_CONSTRAINT',
+    ];
+    const rows: StoredRow[] = [];
+    const addKeyColumn = (
+      table: TableModel,
+      constraintName: string,
+      columnName: string,
+      ordinalPosition: number,
+      positionInUniqueConstraint: SqlValue = null
+    ) => {
+      rows.push({
+        CONSTRAINT_CATALOG: database.name,
+        CONSTRAINT_SCHEMA: 'dbo',
+        CONSTRAINT_NAME: constraintName,
+        TABLE_CATALOG: database.name,
+        TABLE_SCHEMA: 'dbo',
+        TABLE_NAME: table.name,
+        COLUMN_NAME: columnName,
+        ORDINAL_POSITION: ordinalPosition,
+        POSITION_IN_UNIQUE_CONSTRAINT: positionInUniqueConstraint,
+      });
+    };
+
+    for (const table of tables) {
+      const primaryKeyColumns = table.primaryKeyColumns?.length
+        ? table.primaryKeyColumns
+        : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      primaryKeyColumns.forEach((columnName, index) => {
+        addKeyColumn(table, 'PK_' + table.name, columnName, index + 1);
+      });
+
+      (table.uniqueConstraints ?? []).forEach((uniqueColumns, constraintIndex) => {
+        uniqueColumns.forEach((columnName, index) => {
+          addKeyColumn(table, 'UQ_' + table.name + '_' + (constraintIndex + 1), columnName, index + 1);
+        });
+      });
+
+      for (const column of table.columns.filter((item) => item.unique)) {
+        addKeyColumn(table, 'UQ_' + table.name + '_' + column.name, column.name, 1);
+      }
+
+      for (const foreignKey of table.foreignKeys ?? []) {
+        addKeyColumn(table, foreignKey.name, foreignKey.column, 1, 1);
+      }
+    }
+
+    return { columns, rows };
+  }
+
+  if (objectName === 'information_schema.referential_constraints') {
+    const columns = [
+      'CONSTRAINT_CATALOG',
+      'CONSTRAINT_SCHEMA',
+      'CONSTRAINT_NAME',
+      'UNIQUE_CONSTRAINT_CATALOG',
+      'UNIQUE_CONSTRAINT_SCHEMA',
+      'UNIQUE_CONSTRAINT_NAME',
+      'MATCH_OPTION',
+      'UPDATE_RULE',
+      'DELETE_RULE',
+    ];
+    const rows: StoredRow[] = [];
+
+    const referencedKeyName = (foreignKey: ForeignKeyModel): string | null => {
+      const referencedTable = tables.find(
+        (table) => keyOf(table.name) === keyOf(foreignKey.referencedTable)
+      );
+      if (!referencedTable) return null;
+
+      const primaryKeyColumns = referencedTable.primaryKeyColumns?.length
+        ? referencedTable.primaryKeyColumns
+        : referencedTable.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      if (primaryKeyColumns.length === 1 && keyOf(primaryKeyColumns[0]) === keyOf(foreignKey.referencedColumn)) {
+        return 'PK_' + referencedTable.name;
+      }
+
+      const uniqueConstraintIndex = (referencedTable.uniqueConstraints ?? []).findIndex(
+        (uniqueColumns) => uniqueColumns.length === 1
+          && keyOf(uniqueColumns[0]) === keyOf(foreignKey.referencedColumn)
+      );
+      if (uniqueConstraintIndex >= 0) {
+        return 'UQ_' + referencedTable.name + '_' + (uniqueConstraintIndex + 1);
+      }
+
+      const uniqueColumn = referencedTable.columns.find(
+        (column) => column.unique && keyOf(column.name) === keyOf(foreignKey.referencedColumn)
+      );
+      return uniqueColumn ? 'UQ_' + referencedTable.name + '_' + uniqueColumn.name : null;
+    };
+
+    for (const table of tables) {
+      for (const foreignKey of table.foreignKeys ?? []) {
+        rows.push({
+          CONSTRAINT_CATALOG: database.name,
+          CONSTRAINT_SCHEMA: 'dbo',
+          CONSTRAINT_NAME: foreignKey.name,
+          UNIQUE_CONSTRAINT_CATALOG: database.name,
+          UNIQUE_CONSTRAINT_SCHEMA: 'dbo',
+          UNIQUE_CONSTRAINT_NAME: referencedKeyName(foreignKey),
+          MATCH_OPTION: 'SIMPLE',
+          UPDATE_RULE: 'NO ACTION',
+          DELETE_RULE: 'NO ACTION',
+        });
+      }
+    }
+
+    return { columns, rows };
+  }
+
   if (objectName === 'information_schema.views') {
     const columns = [
       'TABLE_CATALOG',

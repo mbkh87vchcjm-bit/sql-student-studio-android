@@ -257,3 +257,8 @@ sql-student-studio/
 ## إدارة المخططات (SCHEMA)
 
 يدعم الإصدار الحالي إنشاء المخططات الفارغة عبر `CREATE SCHEMA`، وعرضها في `sys.schemas`، وحذف المخطط الفارغ عبر `DROP SCHEMA` مع حماية المخطط الافتراضي `dbo`. لا يدعم هذا القسم بعد `ALTER SCHEMA TRANSFER` أو إنشاء/نقل الجداول والعروض داخل مخططات غير `dbo`، كما لا يحاكي ملكية المخططات والصلاحيات.
+
+
+## كتالوجات INFORMATION_SCHEMA الإضافية
+
+أضيف دعم تعليمي لـ `INFORMATION_SCHEMA.KEY_COLUMN_USAGE` و`INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS` لعرض أعمدة المفاتيح الأساسية والفريدة والخارجية، وربط المفتاح الخارجي بالمفتاح المرجعي. قواعد `UPDATE_RULE` و`DELETE_RULE` تعرض `NO ACTION` لأن المحرك لا يطبق إجراءات CASCADE حالياً. تبقى هذه الكتالوجات مجموعة فرعية تعليمية وليست بديلاً عن كتالوج SQL Server الكامل.
