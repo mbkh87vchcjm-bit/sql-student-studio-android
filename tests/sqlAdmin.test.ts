@@ -1520,6 +1520,13 @@ test('CREATE OR ALTER VIEW creates a view, updates it, and preserves the last va
 });
 
 
+test('SQL Server security commands are rejected even before a database is selected', () => {
+  const noDatabase = executeScript(EMPTY_STATE, 'GRANT SELECT ON Students TO StudentRole;');
+  assert.ok(noDatabase.result.errors.length > 0);
+  assert.match(noDatabase.result.errors[0], /غير مطبقة.*بلا مصادقة أو نموذج صلاحيات/);
+  assert.strictEqual(Object.keys(noDatabase.state.databases).length, 0);
+});
+
 test('SQL Server security commands are rejected explicitly because the simulator has no authentication or permission model', () => {
   const created = executeScript(
     EMPTY_STATE,

@@ -2605,6 +2605,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { messages: ['تم حذف قاعدة البيانات ' + targetDatabase.name + '.'] });
   }
 
+  // Reject security commands before requiring a selected database. The simulator has no auth model.
+  if (/^(?:CREATE\s+(?:LOGIN|USER|ROLE)\b|ALTER\s+(?:LOGIN|USER|ROLE)\b|DROP\s+(?:LOGIN|USER|ROLE)\b|GRANT\b|DENY\b|REVOKE\b|EXEC(?:UTE)?\s+sp_(?:addlogin|adduser|addrole|grantdbaccess)\b)/i.test(sql)) {
+    return errorResult(
+      state,
+      start,
+      'إدارة المستخدمين والأدوار والصلاحيات (LOGIN/USER/ROLE/GRANT/DENY/REVOKE) غير مطبقة. هذا المحرك محاكاة تعليمية محلية بلا مصادقة أو نموذج صلاحيات، ولا يجوز اعتباره حدًا أمنيًا.'
+    );
+  }
+
   // 3. USE DATABASE
   match = sql.match(/^USE\s+([[\]\w-]+)$/i);
   if (match) {
@@ -3665,14 +3674,6 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     table.rows = candidateRows;
     const affected = before - table.rows.length;
     return success(state, start, { affectedRows: affected, messages: [`(${affected} rows affected)`] });
-  }
-
-  if (/^(?:CREATE\s+(?:LOGIN|USER|ROLE)\b|ALTER\s+(?:LOGIN|USER|ROLE)\b|DROP\s+(?:LOGIN|USER|ROLE)\b|GRANT\b|DENY\b|REVOKE\b|EXEC(?:UTE)?\s+sp_(?:addlogin|adduser|addrole|grantdbaccess)\b)/i.test(sql)) {
-    return errorResult(
-      state,
-      start,
-      'إدارة المستخدمين والأدوار والصلاحيات (LOGIN/USER/ROLE/GRANT/DENY/REVOKE) غير مطبقة. هذا المحرك محاكاة تعليمية محلية بلا مصادقة أو نموذج صلاحيات، ولا يجوز اعتباره حدًا أمنيًا.'
-    );
   }
 
   return errorResult(state, start, `تعليمة غير مدعومة: ${sql.split(/\s+/).slice(0, 3).join(' ')}`);
