@@ -41,6 +41,8 @@ export interface IndexModel {
 
 export interface TableModel {
   name: string;
+  /** Optional schema name; legacy objects without it belong to dbo. */
+  schema?: string;
   columns: ColumnModel[];
   rows: StoredRow[];
   /** Optional for backward compatibility with previously saved workspaces. */
@@ -57,15 +59,24 @@ export interface TableModel {
 
 export interface ViewModel {
   name: string;
+  /** Optional schema name; legacy views without it belong to dbo. */
+  schema?: string;
   /** The SELECT definition is re-evaluated whenever the view is queried. */
   definition: string;
   /** Cached output column names for INFORMATION_SCHEMA metadata. */
   columns?: string[];
 }
 
+export interface SchemaModel {
+  name: string;
+  /** Schema ownership is intentionally not modeled in this educational engine. */
+}
+
 export interface DatabaseModel {
   name: string;
   tables: Record<string, TableModel>;
+  /** Additional empty schemas; dbo exists implicitly for backward compatibility. */
+  schemas?: Record<string, SchemaModel>;
   /** Optional for backward compatibility with saved databases from older versions. */
   views?: Record<string, ViewModel>;
 }
@@ -1223,6 +1234,125 @@ function informationSchemaData(sourceName: string, database: DatabaseModel): Vir
     return { columns, rows };
   }
 
+  if (objectName === 'information_schema.key_column_usage') {
+    const columns = [
+      'CONSTRAINT_CATALOG',
+      'CONSTRAINT_SCHEMA',
+      'CONSTRAINT_NAME',
+      'TABLE_CATALOG',
+      'TABLE_SCHEMA',
+      'TABLE_NAME',
+      'COLUMN_NAME',
+      'ORDINAL_POSITION',
+      'POSITION_IN_UNIQUE_CONSTRAINT',
+    ];
+    const rows: StoredRow[] = [];
+    const addKeyColumn = (
+      table: TableModel,
+      constraintName: string,
+      columnName: string,
+      ordinalPosition: number,
+      positionInUniqueConstraint: SqlValue = null
+    ) => {
+      rows.push({
+        CONSTRAINT_CATALOG: database.name,
+        CONSTRAINT_SCHEMA: 'dbo',
+        CONSTRAINT_NAME: constraintName,
+        TABLE_CATALOG: database.name,
+        TABLE_SCHEMA: 'dbo',
+        TABLE_NAME: table.name,
+        COLUMN_NAME: columnName,
+        ORDINAL_POSITION: ordinalPosition,
+        POSITION_IN_UNIQUE_CONSTRAINT: positionInUniqueConstraint,
+      });
+    };
+
+    for (const table of tables) {
+      const primaryKeyColumns = table.primaryKeyColumns?.length
+        ? table.primaryKeyColumns
+        : table.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      primaryKeyColumns.forEach((columnName, index) => {
+        addKeyColumn(table, 'PK_' + table.name, columnName, index + 1);
+      });
+
+      (table.uniqueConstraints ?? []).forEach((uniqueColumns, constraintIndex) => {
+        uniqueColumns.forEach((columnName, index) => {
+          addKeyColumn(table, 'UQ_' + table.name + '_' + (constraintIndex + 1), columnName, index + 1);
+        });
+      });
+
+      for (const column of table.columns.filter((item) => item.unique)) {
+        addKeyColumn(table, 'UQ_' + table.name + '_' + column.name, column.name, 1);
+      }
+
+      for (const foreignKey of table.foreignKeys ?? []) {
+        addKeyColumn(table, foreignKey.name, foreignKey.column, 1, 1);
+      }
+    }
+
+    return { columns, rows };
+  }
+
+  if (objectName === 'information_schema.referential_constraints') {
+    const columns = [
+      'CONSTRAINT_CATALOG',
+      'CONSTRAINT_SCHEMA',
+      'CONSTRAINT_NAME',
+      'UNIQUE_CONSTRAINT_CATALOG',
+      'UNIQUE_CONSTRAINT_SCHEMA',
+      'UNIQUE_CONSTRAINT_NAME',
+      'MATCH_OPTION',
+      'UPDATE_RULE',
+      'DELETE_RULE',
+    ];
+    const rows: StoredRow[] = [];
+
+    const referencedKeyName = (foreignKey: ForeignKeyModel): string | null => {
+      const referencedTable = tables.find(
+        (table) => keyOf(table.name) === keyOf(foreignKey.referencedTable)
+      );
+      if (!referencedTable) return null;
+
+      const primaryKeyColumns = referencedTable.primaryKeyColumns?.length
+        ? referencedTable.primaryKeyColumns
+        : referencedTable.columns.filter((column) => column.primaryKey).map((column) => column.name);
+      if (primaryKeyColumns.length === 1 && keyOf(primaryKeyColumns[0]) === keyOf(foreignKey.referencedColumn)) {
+        return 'PK_' + referencedTable.name;
+      }
+
+      const uniqueConstraintIndex = (referencedTable.uniqueConstraints ?? []).findIndex(
+        (uniqueColumns) => uniqueColumns.length === 1
+          && keyOf(uniqueColumns[0]) === keyOf(foreignKey.referencedColumn)
+      );
+      if (uniqueConstraintIndex >= 0) {
+        return 'UQ_' + referencedTable.name + '_' + (uniqueConstraintIndex + 1);
+      }
+
+      const uniqueColumn = referencedTable.columns.find(
+        (column) => column.unique && keyOf(column.name) === keyOf(foreignKey.referencedColumn)
+      );
+      return uniqueColumn ? 'UQ_' + referencedTable.name + '_' + uniqueColumn.name : null;
+    };
+
+    for (const table of tables) {
+      for (const foreignKey of table.foreignKeys ?? []) {
+        rows.push({
+          CONSTRAINT_CATALOG: database.name,
+          CONSTRAINT_SCHEMA: 'dbo',
+          CONSTRAINT_NAME: foreignKey.name,
+          UNIQUE_CONSTRAINT_CATALOG: database.name,
+          UNIQUE_CONSTRAINT_SCHEMA: 'dbo',
+          UNIQUE_CONSTRAINT_NAME: referencedKeyName(foreignKey),
+          MATCH_OPTION: 'SIMPLE',
+          UPDATE_RULE: 'NO ACTION',
+          DELETE_RULE: 'NO ACTION',
+        });
+      }
+    }
+
+    return { columns, rows };
+  }
+
   if (objectName === 'information_schema.views') {
     const columns = [
       'TABLE_CATALOG',
@@ -1300,7 +1430,17 @@ function systemCatalogData(
   const objectColumns = ['object_id', 'name', 'schema_id', 'type', 'type_desc', 'is_ms_shipped'];
 
   if (source === 'sys.schemas') {
-    return { columns: ['schema_id', 'name'], rows: [{ schema_id: 1, name: 'dbo' }] };
+    const schemaNames = [
+      'dbo',
+      ...Object.values(database.schemas ?? {})
+        .map((schema) => schema.name)
+        .filter((name) => keyOf(name) !== 'dbo')
+        .sort((left, right) => keyOf(left).localeCompare(keyOf(right))),
+    ];
+    return {
+      columns: ['schema_id', 'name'],
+      rows: schemaNames.map((name, index) => ({ schema_id: index + 1, name })),
+    };
   }
 
   if (source === 'sys.objects' || source === 'sys.tables' || source === 'sys.views') {
@@ -2463,6 +2603,145 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
 
   const database = databaseFor(state);
   if (!database) return errorResult(state, start, 'اختر قاعدة بيانات أولًا باستخدام USE أو أنشئ قاعدة جديدة.');
+
+  // CREATE SCHEMA: this stage registers empty schemas; object placement/transfer is a later capability.
+  match = sql.match(/^CREATE\s+SCHEMA\s+([[\]\w-]+)$/i);
+  if (match) {
+    const schemaName = cleanName(match[1]);
+    const schemaKey = keyOf(schemaName);
+    if (schemaKey === 'dbo' || database.schemas?.[schemaKey]) {
+      return errorResult(state, start, 'المخطط "' + schemaName + '" موجود بالفعل.');
+    }
+    database.schemas ??= {};
+    database.schemas[schemaKey] = { name: schemaName };
+    return success(state, start, { messages: ['تم إنشاء المخطط الفارغ "' + schemaName + '".'] });
+  }
+
+  // DROP SCHEMA [IF EXISTS]: dbo is a permanent default schema.
+  match = sql.match(/^DROP\s+SCHEMA\s+(IF\s+EXISTS\s+)?([[\]\w-]+)$/i);
+  if (match) {
+    const ifExists = Boolean(match[1]);
+    const schemaName = cleanName(match[2]);
+    const schemaKey = keyOf(schemaName);
+    const schema = schemaKey === 'dbo' ? { name: 'dbo' } : database.schemas?.[schemaKey];
+    if (!schema) {
+      return ifExists
+        ? success(state, start, { messages: ['المخطط "' + schemaName + '" غير موجود؛ لم يحدث أي تغيير.'] })
+        : errorResult(state, start, 'المخطط "' + schemaName + '" غير موجود.');
+    }
+    if (schemaKey === 'dbo') {
+      return errorResult(state, start, 'لا يمكن حذف المخطط الافتراضي dbo.');
+    }
+    const ownsTable = Object.values(database.tables).some((table) => keyOf(table.schema ?? 'dbo') === schemaKey);
+    const ownsView = Object.values(database.views ?? {}).some((view) => keyOf(view.schema ?? 'dbo') === schemaKey);
+    if (ownsTable || ownsView) {
+      return errorResult(state, start, 'لا يمكن حذف المخطط "' + schemaName + '" لأنه يحتوي على كائنات.');
+    }
+    delete database.schemas![schemaKey];
+    if (Object.keys(database.schemas!).length === 0) delete database.schemas;
+    return success(state, start, { messages: ['تم حذف المخطط "' + schema.name + '".'] });
+  }
+
+  if (/^ALTER\s+SCHEMA\b/i.test(sql)) {
+    return errorResult(state, start, 'ALTER SCHEMA TRANSFER غير مدعوم بعد؛ نقل الجداول والعروض بين المخططات لم يُنفذ في هذا الإصدار.');
+  }
+
+  // Educational, read-only subset of SQL Server system procedures.
+  // The simulator returns one tabular result set rather than SQL Server's multiple result sets.
+
+  const readProcedureTarget = (rawArgument: string | undefined): string | null => {
+    if (!rawArgument) return null;
+    const withoutNamedArgument = rawArgument.trim().replace(/^@(objname|table_name)\s*=\s*/i, '');
+    const parsed = parseValue(withoutNamedArgument);
+    const rawName = typeof parsed === 'string' ? parsed : withoutNamedArgument;
+    const parts = cleanName(rawName).split('.');
+    return cleanName(parts[parts.length - 1]);
+  };
+
+  match = sql.match(/^EXEC(?:UTE)?\s+sp_help(?:\s+([\s\S]+))?$/i);
+  if (match) {
+    const targetName = readProcedureTarget(match[1]);
+    const objects = [
+      ...Object.values(database.tables).map((table) => ({ name: table.name, type: 'TABLE' as const, table })),
+      ...Object.values(database.views ?? {}).map((view) => ({ name: view.name, type: 'VIEW' as const, view })),
+    ];
+
+    if (!targetName) {
+      const columns = ['ObjectName', 'ObjectType', 'ColumnCount', 'RowCount'];
+      const rows = objects
+        .sort((left, right) => keyOf(left.name).localeCompare(keyOf(right.name)))
+        .map((item) => ({
+          ObjectName: item.name,
+          ObjectType: item.type,
+          ColumnCount: item.type === 'TABLE' ? item.table.columns.length : (item.view.columns ?? []).length,
+          RowCount: item.type === 'TABLE' ? item.table.rows.length : null,
+        }));
+      return success(state, start, {
+        columns,
+        rows: rows.map((row) => columns.map((column) => valueToText(row[column as keyof typeof row] ?? null))),
+        messages: ['sp_help: ملخص تعليمي للكائنات في قاعدة البيانات الحالية.'],
+      });
+    }
+
+    const table = tableFor(database, targetName);
+    const view = database.views?.[keyOf(targetName)];
+    if (!table && !view) {
+      return errorResult(state, start, 'الكائن "' + targetName + '" غير موجود في قاعدة البيانات الحالية.');
+    }
+
+    const columns = [
+      'ObjectName', 'ObjectType', 'ColumnOrdinal', 'ColumnName', 'DataType',
+      'Nullable', 'PrimaryKey', 'Unique', 'Identity', 'DefaultValue',
+    ];
+    const rows: StoredRow[] = table
+      ? table.columns.map((column, index) => ({
+          ObjectName: table.name,
+          ObjectType: 'TABLE',
+          ColumnOrdinal: index + 1,
+          ColumnName: column.name,
+          DataType: column.type,
+          Nullable: column.nullable ? 'YES' : 'NO',
+          PrimaryKey: column.primaryKey ? 'YES' : 'NO',
+          Unique: column.unique ? 'YES' : 'NO',
+          Identity: column.identity ? 'YES' : 'NO',
+          DefaultValue: column.defaultValue === undefined ? null : valueToText(column.defaultValue),
+        }))
+      : (view!.columns ?? []).map((columnName, index) => ({
+          ObjectName: view!.name,
+          ObjectType: 'VIEW',
+          ColumnOrdinal: index + 1,
+          ColumnName: columnName,
+          DataType: null,
+          Nullable: 'UNKNOWN',
+          PrimaryKey: 'NO',
+          Unique: 'NO',
+          Identity: 'NO',
+          DefaultValue: null,
+        }));
+    return success(state, start, {
+      columns,
+      rows: rows.map((row) => columns.map((column) => valueToText(row[column] ?? null))),
+      messages: ['sp_help: بيانات وصفية تعليمية مبسطة؛ ليست جميع مجموعات نتائج SQL Server الأصلية.'],
+    });
+  }
+
+  match = sql.match(/^EXEC(?:UTE)?\s+sp_tables(?:\s+([\s\S]+))?$/i);
+  if (match) {
+    const filterName = match[1] ? readProcedureTarget(match[1]) : null;
+    const objects = [
+      ...Object.values(database.tables).map((table) => ({ name: table.name, type: 'TABLE' })),
+      ...Object.values(database.views ?? {}).map((view) => ({ name: view.name, type: 'VIEW' })),
+    ]
+      .filter((item) => !filterName || keyOf(item.name) === keyOf(filterName))
+      .sort((left, right) => keyOf(left.name).localeCompare(keyOf(right.name)));
+    const columns = ['TABLE_QUALIFIER', 'TABLE_OWNER', 'TABLE_NAME', 'TABLE_TYPE', 'REMARKS'];
+    const rows = objects.map((item) => [database.name, 'dbo', item.name, item.type, 'NULL']);
+    return success(state, start, {
+      columns,
+      rows,
+      messages: ['sp_tables: قائمة تعليمية بالجداول والعروض ضمن المخطط dbo.'],
+    });
+  }
 
   // CREATE / ALTER VIEW: persist a validated SELECT definition, not a snapshot of rows.
   match = sql.match(/^CREATE\s+VIEW\s+([\[\]\w.-]+)\s+AS\s+([\s\S]+)$/i);

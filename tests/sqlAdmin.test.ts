@@ -1209,3 +1209,186 @@ test('sys.databases lists simulated databases and documents online/access metada
     ['BetaDB', '6', 'ONLINE', 'MULTI_USER', '0'],
   ]);
 });
+
+
+test('DATABASE commands accept bracket-delimited identifiers', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    'CREATE DATABASE [LabDB]; CREATE DATABASE MaintenanceDB; USE [LabDB];'
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.currentDatabase, 'LabDB');
+
+  const switched = executeScript(created.state, 'USE [MaintenanceDB];');
+  assert.deepStrictEqual(switched.result.errors, []);
+  const dropped = executeScript(switched.state, 'DROP DATABASE [LabDB];');
+  assert.deepStrictEqual(dropped.result.errors, []);
+  assert.strictEqual(Boolean(dropped.state.databases.labdb), false);
+  assert.strictEqual(dropped.state.currentDatabase, 'MaintenanceDB');
+});
+
+
+test('CREATE SCHEMA registers non-dbo schemas and DROP SCHEMA removes only empty schemas', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    'CREATE DATABASE SchemaDB; USE SchemaDB; CREATE SCHEMA Sales; CREATE SCHEMA [Analytics];'
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const listed = executeScript(
+    created.state,
+    'SELECT schema_id, name FROM sys.schemas ORDER BY schema_id;'
+  );
+  assert.deepStrictEqual(listed.result.errors, []);
+  assert.deepStrictEqual(listed.result.rows, [
+    ['1', 'dbo'],
+    ['2', 'Analytics'],
+    ['3', 'Sales'],
+  ]);
+
+  const duplicate = executeScript(created.state, 'CREATE SCHEMA sales;');
+  assert.ok(duplicate.result.errors.length > 0);
+  assert.match(duplicate.result.errors[0], /موجود بالفعل/);
+
+  const dropDbo = executeScript(created.state, 'DROP SCHEMA dbo;');
+  assert.ok(dropDbo.result.errors.length > 0);
+  assert.match(dropDbo.result.errors[0], /dbo/);
+
+  const dropped = executeScript(created.state, 'DROP SCHEMA Sales;');
+  assert.deepStrictEqual(dropped.result.errors, []);
+  const afterDrop = executeScript(dropped.state, 'SELECT name FROM sys.schemas ORDER BY name;');
+  assert.deepStrictEqual(afterDrop.result.errors, []);
+  assert.deepStrictEqual(afterDrop.result.rows, [['Analytics'], ['dbo']]);
+
+  const missingIfExists = executeScript(dropped.state, 'DROP SCHEMA IF EXISTS MissingSchema;');
+  assert.deepStrictEqual(missingIfExists.result.errors, []);
+});
+
+test('ALTER SCHEMA TRANSFER reports its current implementation limit explicitly', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE SchemaTransferDB; USE SchemaTransferDB; CREATE SCHEMA Sales;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const transfer = executeScript(created.state, 'ALTER SCHEMA Sales TRANSFER dbo.Orders;');
+  assert.ok(transfer.result.errors.length > 0);
+  assert.match(transfer.result.errors[0], /غير مدعوم بعد/);
+});
+
+
+test('INFORMATION_SCHEMA.KEY_COLUMN_USAGE lists primary, unique, and foreign-key columns in key order', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE KeyUsageDB;
+USE KeyUsageDB;
+CREATE TABLE Departments (
+  Id INT PRIMARY KEY,
+  Code NVARCHAR(12) UNIQUE
+);
+CREATE TABLE Students (
+  Id INT PRIMARY KEY,
+  DepartmentCode NVARCHAR(12),
+  CONSTRAINT FK_Students_DepartmentCode FOREIGN KEY (DepartmentCode)
+    REFERENCES Departments(Code)
+);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(
+    created.state,
+    `SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, POSITION_IN_UNIQUE_CONSTRAINT
+     FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+     ORDER BY CONSTRAINT_NAME;`
+  );
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['FK_Students_DepartmentCode', 'Students', 'DepartmentCode', '1', '1'],
+    ['PK_Departments', 'Departments', 'Id', '1', 'NULL'],
+    ['PK_Students', 'Students', 'Id', '1', 'NULL'],
+    ['UQ_Departments_Code', 'Departments', 'Code', '1', 'NULL'],
+  ]);
+});
+
+test('INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS resolves the referenced unique key and NO ACTION rules', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    `CREATE DATABASE ReferentialDB;
+USE ReferentialDB;
+CREATE TABLE Departments (
+  Id INT PRIMARY KEY,
+  Code NVARCHAR(12) UNIQUE
+);
+CREATE TABLE Students (
+  Id INT PRIMARY KEY,
+  DepartmentCode NVARCHAR(12),
+  CONSTRAINT FK_Students_DepartmentCode FOREIGN KEY (DepartmentCode)
+    REFERENCES Departments(Code)
+);`
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(
+    created.state,
+    `SELECT CONSTRAINT_NAME, UNIQUE_CONSTRAINT_NAME, MATCH_OPTION, UPDATE_RULE, DELETE_RULE
+     FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS;`
+  );
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.rows, [
+    ['FK_Students_DepartmentCode', 'UQ_Departments_Code', 'SIMPLE', 'NO ACTION', 'NO ACTION'],
+  ]);
+});
+
+
+test('EXEC sp_help returns read-only table and column metadata', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE HelpDB;\nUSE HelpDB;\nCREATE TABLE Users (\n  Id INT IDENTITY(10,2) PRIMARY KEY,\n  Name NVARCHAR(30) NOT NULL,\n  Enabled BIT NOT NULL DEFAULT 1\n);\nINSERT INTO Users (Name) VALUES ('Ali');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(created.state, "EXEC sp_help 'Users';");
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.columns, [
+    'ObjectName', 'ObjectType', 'ColumnOrdinal', 'ColumnName', 'DataType',
+    'Nullable', 'PrimaryKey', 'Unique', 'Identity', 'DefaultValue',
+  ]);
+  assert.deepStrictEqual(result.result.rows, [
+    ['Users', 'TABLE', '1', 'Id', 'INT', 'NO', 'YES', 'NO', 'YES', 'NULL'],
+    ['Users', 'TABLE', '2', 'Name', 'NVARCHAR(30)', 'NO', 'NO', 'NO', 'NO', 'NULL'],
+    ['Users', 'TABLE', '3', 'Enabled', 'BIT', 'NO', 'NO', 'NO', 'NO', '1'],
+  ]);
+  assert.strictEqual(result.state.databases.helpdb.tables.users.rows.length, 1);
+});
+
+test('EXEC sp_help without an object lists local objects and sp_tables supports a table filter', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE HelpListDB;\nUSE HelpListDB;\nCREATE TABLE Students (Id INT PRIMARY KEY, Name NVARCHAR(20));\nCREATE VIEW StudentNames AS SELECT Name FROM Students;"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const summary = executeScript(created.state, 'EXECUTE sp_help;');
+  assert.deepStrictEqual(summary.result.errors, []);
+  assert.deepStrictEqual(summary.result.rows, [
+    ['StudentNames', 'VIEW', '1', 'NULL'],
+    ['Students', 'TABLE', '2', '0'],
+  ]);
+
+  const allTables = executeScript(created.state, 'EXEC sp_tables;');
+  assert.deepStrictEqual(allTables.result.errors, []);
+  assert.deepStrictEqual(allTables.result.rows, [
+    ['HelpListDB', 'dbo', 'StudentNames', 'VIEW', 'NULL'],
+    ['HelpListDB', 'dbo', 'Students', 'TABLE', 'NULL'],
+  ]);
+
+  const filtered = executeScript(created.state, "EXEC sp_tables @table_name = 'Students';");
+  assert.deepStrictEqual(filtered.result.errors, []);
+  assert.deepStrictEqual(filtered.result.rows, [
+    ['HelpListDB', 'dbo', 'Students', 'TABLE', 'NULL'],
+  ]);
+});
+
+test('EXEC sp_help reports a clear error for an unknown object', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE HelpMissingDB; USE HelpMissingDB;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, "EXEC sp_help 'GhostTable';");
+  assert.ok(result.result.errors.length > 0);
+  assert.match(result.result.errors[0], /غير موجود/);
+});
