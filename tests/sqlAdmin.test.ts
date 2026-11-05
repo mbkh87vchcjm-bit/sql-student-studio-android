@@ -1209,3 +1209,20 @@ test('sys.databases lists simulated databases and documents online/access metada
     ['BetaDB', '6', 'ONLINE', 'MULTI_USER', '0'],
   ]);
 });
+
+
+test('DATABASE commands accept bracket-delimited identifiers', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    'CREATE DATABASE [LabDB]; CREATE DATABASE MaintenanceDB; USE [LabDB];'
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  assert.strictEqual(created.state.currentDatabase, 'LabDB');
+
+  const switched = executeScript(created.state, 'USE [MaintenanceDB];');
+  assert.deepStrictEqual(switched.result.errors, []);
+  const dropped = executeScript(switched.state, 'DROP DATABASE [LabDB];');
+  assert.deepStrictEqual(dropped.result.errors, []);
+  assert.strictEqual(Boolean(dropped.state.databases.labdb), false);
+  assert.strictEqual(dropped.state.currentDatabase, 'MaintenanceDB');
+});
