@@ -1149,8 +1149,8 @@ test('sys.key_constraints distinguishes primary-key and unique constraints', () 
   assert.deepStrictEqual(result.result.errors, []);
   assert.deepStrictEqual(result.result.rows, [
     ['PK_Users', 'PK', 'PRIMARY_KEY_CONSTRAINT'],
-    ['UQ_Users_Email', 'UQ', 'UNIQUE_CONSTRAINT'],
     ['UQ_Users_1', 'UQ', 'UNIQUE_CONSTRAINT'],
+    ['UQ_Users_Email', 'UQ', 'UNIQUE_CONSTRAINT'],
   ]);
 });
 
