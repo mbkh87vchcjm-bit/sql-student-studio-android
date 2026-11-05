@@ -9,7 +9,7 @@ import { AppMark, ScreenHeader } from '@/components/StudioUI';
 export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { locale, setLocale, reset } = useStudio();
+  const { locale, setLocale, reset, hydrated } = useStudio();
   const isArabic = locale === 'ar';
   const confirmReset = () => Alert.alert(isArabic ? 'مسح مساحة العمل؟' : 'Clear workspace?', isArabic ? 'سيتم حذف قواعد البيانات المحفوظة محليًا.' : 'Locally saved databases will be deleted.', [{ text: isArabic ? 'إلغاء' : 'Cancel', style: 'cancel' }, { text: isArabic ? 'مسح' : 'Clear', style: 'destructive', onPress: reset }]);
   return (
@@ -22,7 +22,7 @@ export default function SettingsScreen() {
         <View style={[styles.segment, { backgroundColor: colors.secondary }]}><Pressable onPress={() => setLocale('ar')} style={[styles.segmentButton, locale === 'ar' && { backgroundColor: colors.primary }]}><Text style={[styles.segmentText, { color: locale === 'ar' ? colors.primaryForeground : colors.secondaryForeground }]}>عربي</Text></Pressable><Pressable onPress={() => setLocale('en')} style={[styles.segmentButton, locale === 'en' && { backgroundColor: colors.primary }]}><Text style={[styles.segmentText, { color: locale === 'en' ? colors.primaryForeground : colors.secondaryForeground }]}>EN</Text></Pressable></View>
       </View>
       <Text style={[styles.groupLabel, { color: colors.mutedForeground }]}>{isArabic ? 'مساحة العمل' : 'WORKSPACE'}</Text>
-      <Pressable testID="reset-workspace" onPress={confirmReset} style={[styles.optionCard, { backgroundColor: colors.card, borderColor: colors.border }]}><View style={[styles.optionIcon, { backgroundColor: '#FFF0EE' }]}><Feather name="trash-2" size={18} color={colors.destructive} /></View><View style={styles.optionCopy}><Text style={[styles.optionTitle, { color: colors.foreground }]}>{isArabic ? 'مسح قواعد البيانات' : 'Clear databases'}</Text><Text style={[styles.optionSub, { color: colors.mutedForeground }]}>{isArabic ? 'حذف كل البيانات المحلية وإعادة المحرر للدرس التجريبي' : 'Delete local data and restore the starter lesson'}</Text></View><Feather name="chevron-left" size={18} color={colors.mutedForeground} /></Pressable>
+      <Pressable testID="reset-workspace" accessibilityRole="button" accessibilityState={{ disabled: !hydrated }} disabled={!hydrated} onPress={confirmReset} style={[styles.optionCard, { backgroundColor: colors.card, borderColor: colors.border, opacity: hydrated ? 1 : 0.45 }]}><View style={[styles.optionIcon, { backgroundColor: '#FFF0EE' }]}><Feather name="trash-2" size={18} color={colors.destructive} /></View><View style={styles.optionCopy}><Text style={[styles.optionTitle, { color: colors.foreground }]}>{isArabic ? 'مسح قواعد البيانات' : 'Clear databases'}</Text><Text style={[styles.optionSub, { color: colors.mutedForeground }]}>{isArabic ? 'حذف كل البيانات المحلية وإعادة المحرر للدرس التجريبي' : 'Delete local data and restore the starter lesson'}</Text></View><Feather name="chevron-left" size={18} color={colors.mutedForeground} /></Pressable>
       <View style={styles.note}><Feather name="info" size={16} color={colors.primary} /><Text style={[styles.noteText, { color: colors.mutedForeground }]}>{isArabic ? 'هذا التطبيق محرك T-SQL تعليمي مستقل، وليس Microsoft SQL Server.' : 'This is an independent educational T-SQL engine, not Microsoft SQL Server.'}</Text></View>
 
       <Text style={[styles.groupLabel, { color: colors.mutedForeground }]}>{isArabic ? 'حول التطبيق' : 'ABOUT APP'}</Text>
