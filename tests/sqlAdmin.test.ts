@@ -1334,3 +1334,61 @@ CREATE TABLE Students (
     ['FK_Students_DepartmentCode', 'UQ_Departments_Code', 'SIMPLE', 'NO ACTION', 'NO ACTION'],
   ]);
 });
+
+
+test('EXEC sp_help returns read-only table and column metadata', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE HelpDB;\nUSE HelpDB;\nCREATE TABLE Users (\n  Id INT IDENTITY(10,2) PRIMARY KEY,\n  Name NVARCHAR(30) NOT NULL,\n  Enabled BIT NOT NULL DEFAULT 1\n);\nINSERT INTO Users (Name) VALUES ('Ali');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const result = executeScript(created.state, "EXEC sp_help 'Users';");
+  assert.deepStrictEqual(result.result.errors, []);
+  assert.deepStrictEqual(result.result.columns, [
+    'ObjectName', 'ObjectType', 'ColumnOrdinal', 'ColumnName', 'DataType',
+    'Nullable', 'PrimaryKey', 'Unique', 'Identity', 'DefaultValue',
+  ]);
+  assert.deepStrictEqual(result.result.rows, [
+    ['Users', 'TABLE', '1', 'Id', 'INT', 'NO', 'YES', 'NO', 'YES', 'NULL'],
+    ['Users', 'TABLE', '2', 'Name', 'NVARCHAR(30)', 'NO', 'NO', 'NO', 'NO', 'NULL'],
+    ['Users', 'TABLE', '3', 'Enabled', 'BIT', 'NO', 'NO', 'NO', 'NO', '1'],
+  ]);
+  assert.strictEqual(result.state.databases.helpdb.tables.users.rows.length, 1);
+});
+
+test('EXEC sp_help without an object lists local objects and sp_tables supports a table filter', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE HelpListDB;\nUSE HelpListDB;\nCREATE TABLE Students (Id INT PRIMARY KEY, Name NVARCHAR(20));\nCREATE VIEW StudentNames AS SELECT Name FROM Students;"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const summary = executeScript(created.state, 'EXECUTE sp_help;');
+  assert.deepStrictEqual(summary.result.errors, []);
+  assert.deepStrictEqual(summary.result.rows, [
+    ['StudentNames', 'VIEW', '1', 'NULL'],
+    ['Students', 'TABLE', '2', '0'],
+  ]);
+
+  const allTables = executeScript(created.state, 'EXEC sp_tables;');
+  assert.deepStrictEqual(allTables.result.errors, []);
+  assert.deepStrictEqual(allTables.result.rows, [
+    ['HelpListDB', 'dbo', 'StudentNames', 'VIEW', 'NULL'],
+    ['HelpListDB', 'dbo', 'Students', 'TABLE', 'NULL'],
+  ]);
+
+  const filtered = executeScript(created.state, "EXEC sp_tables @table_name = 'Students';");
+  assert.deepStrictEqual(filtered.result.errors, []);
+  assert.deepStrictEqual(filtered.result.rows, [
+    ['HelpListDB', 'dbo', 'Students', 'TABLE', 'NULL'],
+  ]);
+});
+
+test('EXEC sp_help reports a clear error for an unknown object', () => {
+  const created = executeScript(EMPTY_STATE, 'CREATE DATABASE HelpMissingDB; USE HelpMissingDB;');
+  assert.deepStrictEqual(created.result.errors, []);
+  const result = executeScript(created.state, "EXEC sp_help 'GhostTable';");
+  assert.ok(result.result.errors.length > 0);
+  assert.match(result.result.errors[0], /غير موجود/);
+});

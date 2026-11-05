@@ -262,3 +262,8 @@ sql-student-studio/
 ## كتالوجات INFORMATION_SCHEMA الإضافية
 
 أضيف دعم تعليمي لـ `INFORMATION_SCHEMA.KEY_COLUMN_USAGE` و`INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS` لعرض أعمدة المفاتيح الأساسية والفريدة والخارجية، وربط المفتاح الخارجي بالمفتاح المرجعي. قواعد `UPDATE_RULE` و`DELETE_RULE` تعرض `NO ACTION` لأن المحرك لا يطبق إجراءات CASCADE حالياً. تبقى هذه الكتالوجات مجموعة فرعية تعليمية وليست بديلاً عن كتالوج SQL Server الكامل.
+
+
+## أدوات الإدارة التعليمية
+
+أضيف دعم مبسط للقراءة فقط عبر EXEC sp_help وEXEC sp_help 'ObjectName' وEXEC sp_tables مع مرشح @table_name. يعرض المحرك مجموعة نتائج واحدة مبسطة للجداول والعروض وأعمدتها؛ لا يدّعي مطابقة جميع مجموعات النتائج أو خيارات الإجراءات المخزنة الأصلية في SQL Server.

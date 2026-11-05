@@ -2646,6 +2646,103 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return errorResult(state, start, 'ALTER SCHEMA TRANSFER غير مدعوم بعد؛ نقل الجداول والعروض بين المخططات لم يُنفذ في هذا الإصدار.');
   }
 
+  // Educational, read-only subset of SQL Server system procedures.
+  // The simulator returns one tabular result set rather than SQL Server's multiple result sets.
+
+  const readProcedureTarget = (rawArgument: string | undefined): string | null => {
+    if (!rawArgument) return null;
+    const withoutNamedArgument = rawArgument.trim().replace(/^@(objname|table_name)\s*=\s*/i, '');
+    const parsed = parseValue(withoutNamedArgument);
+    const rawName = typeof parsed === 'string' ? parsed : withoutNamedArgument;
+    const parts = cleanName(rawName).split('.');
+    return cleanName(parts[parts.length - 1]);
+  };
+
+  match = sql.match(/^EXEC(?:UTE)?\s+sp_help(?:\s+([\s\S]+))?$/i);
+  if (match) {
+    const targetName = readProcedureTarget(match[1]);
+    const objects = [
+      ...Object.values(database.tables).map((table) => ({ name: table.name, type: 'TABLE' as const, table })),
+      ...Object.values(database.views ?? {}).map((view) => ({ name: view.name, type: 'VIEW' as const, view })),
+    ];
+
+    if (!targetName) {
+      const columns = ['ObjectName', 'ObjectType', 'ColumnCount', 'RowCount'];
+      const rows = objects
+        .sort((left, right) => keyOf(left.name).localeCompare(keyOf(right.name)))
+        .map((item) => ({
+          ObjectName: item.name,
+          ObjectType: item.type,
+          ColumnCount: item.type === 'TABLE' ? item.table.columns.length : (item.view.columns ?? []).length,
+          RowCount: item.type === 'TABLE' ? item.table.rows.length : null,
+        }));
+      return success(state, start, {
+        columns,
+        rows: rows.map((row) => columns.map((column) => valueToText(row[column as keyof typeof row] ?? null))),
+        messages: ['sp_help: ملخص تعليمي للكائنات في قاعدة البيانات الحالية.'],
+      });
+    }
+
+    const table = tableFor(database, targetName);
+    const view = database.views?.[keyOf(targetName)];
+    if (!table && !view) {
+      return errorResult(state, start, 'الكائن "' + targetName + '" غير موجود في قاعدة البيانات الحالية.');
+    }
+
+    const columns = [
+      'ObjectName', 'ObjectType', 'ColumnOrdinal', 'ColumnName', 'DataType',
+      'Nullable', 'PrimaryKey', 'Unique', 'Identity', 'DefaultValue',
+    ];
+    const rows: StoredRow[] = table
+      ? table.columns.map((column, index) => ({
+          ObjectName: table.name,
+          ObjectType: 'TABLE',
+          ColumnOrdinal: index + 1,
+          ColumnName: column.name,
+          DataType: column.type,
+          Nullable: column.nullable ? 'YES' : 'NO',
+          PrimaryKey: column.primaryKey ? 'YES' : 'NO',
+          Unique: column.unique ? 'YES' : 'NO',
+          Identity: column.identity ? 'YES' : 'NO',
+          DefaultValue: column.defaultValue === undefined ? null : valueToText(column.defaultValue),
+        }))
+      : (view!.columns ?? []).map((columnName, index) => ({
+          ObjectName: view!.name,
+          ObjectType: 'VIEW',
+          ColumnOrdinal: index + 1,
+          ColumnName: columnName,
+          DataType: null,
+          Nullable: 'UNKNOWN',
+          PrimaryKey: 'NO',
+          Unique: 'NO',
+          Identity: 'NO',
+          DefaultValue: null,
+        }));
+    return success(state, start, {
+      columns,
+      rows: rows.map((row) => columns.map((column) => valueToText(row[column] ?? null))),
+      messages: ['sp_help: بيانات وصفية تعليمية مبسطة؛ ليست جميع مجموعات نتائج SQL Server الأصلية.'],
+    });
+  }
+
+  match = sql.match(/^EXEC(?:UTE)?\s+sp_tables(?:\s+([\s\S]+))?$/i);
+  if (match) {
+    const filterName = match[1] ? readProcedureTarget(match[1]) : null;
+    const objects = [
+      ...Object.values(database.tables).map((table) => ({ name: table.name, type: 'TABLE' })),
+      ...Object.values(database.views ?? {}).map((view) => ({ name: view.name, type: 'VIEW' })),
+    ]
+      .filter((item) => !filterName || keyOf(item.name) === keyOf(filterName))
+      .sort((left, right) => keyOf(left.name).localeCompare(keyOf(right.name)));
+    const columns = ['TABLE_QUALIFIER', 'TABLE_OWNER', 'TABLE_NAME', 'TABLE_TYPE', 'REMARKS'];
+    const rows = objects.map((item) => [database.name, 'dbo', item.name, item.type, 'NULL']);
+    return success(state, start, {
+      columns,
+      rows,
+      messages: ['sp_tables: قائمة تعليمية بالجداول والعروض ضمن المخطط dbo.'],
+    });
+  }
+
   // CREATE / ALTER VIEW: persist a validated SELECT definition, not a snapshot of rows.
   match = sql.match(/^CREATE\s+VIEW\s+([\[\]\w.-]+)\s+AS\s+([\s\S]+)$/i);
   if (match) {
