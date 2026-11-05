@@ -3,7 +3,12 @@ export type SqlValue = string | number | boolean | null;
 export interface IdentityModel {
   seed: number;
   increment: number;
+  /** Next value that an automatically generated identity will receive. */
   nextValue: number;
+  /** Last value that advanced the identity counter; optional for older saved workspaces. */
+  lastValue?: number | null;
+  /** Whether any row has been inserted since table creation or the last TRUNCATE. */
+  hasGeneratedValue?: boolean;
 }
 
 export interface ColumnModel {
@@ -1652,9 +1657,13 @@ function systemCatalogData(
     for (const table of tables) table.columns.forEach((column, index) => {
       if (!column.identity) return;
       const values = table.rows.map((row) => row[column.name]).filter((value): value is number => typeof value === 'number');
-      const lastValue = values.length
+      const legacyCurrentValue = values.length
         ? (column.identity.increment > 0 ? Math.max(...values) : Math.min(...values))
         : null;
+      const inferredHasValue = column.identity.hasGeneratedValue
+        ?? (values.length > 0 || column.identity.nextValue !== column.identity.seed);
+      const lastValue = column.identity.lastValue ?? legacyCurrentValue
+        ?? (inferredHasValue ? column.identity.nextValue - column.identity.increment : null);
       rows.push({
         object_id: idFor(table.name), column_id: index + 1, name: column.name,
         seed_value: column.identity.seed, increment_value: column.identity.increment,
@@ -2834,15 +2843,20 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
       return errorResult(state, start, 'الخيار المدعوم هو NORESEED أو RESEED.');
     }
     if (mode === 'NORESEED') {
-      if (args.length !== 2) return errorResult(state, start, 'لا تقبل NORESEED قيمة إعادة ضبط.');
+      if (args.length > 2) return errorResult(state, start, 'لا تقبل NORESEED قيمة إعادة ضبط.');
       const identityValues = table.rows
         .map((row) => row[identityColumn.name])
         .filter((value): value is number => typeof value === 'number');
-      const currentValue = identityValues.length
+      const legacyCurrentValue = identityValues.length
         ? (identityColumn.identity.increment > 0
           ? Math.max(...identityValues)
           : Math.min(...identityValues))
         : null;
+      const hasGeneratedValue = identityColumn.identity.hasGeneratedValue
+        ?? (identityValues.length > 0 || identityColumn.identity.nextValue !== identityColumn.identity.seed);
+      const currentValue = identityColumn.identity.lastValue
+        ?? legacyCurrentValue
+        ?? (hasGeneratedValue ? identityColumn.identity.nextValue - identityColumn.identity.increment : null);
       return success(state, start, {
         columns: ['TableName', 'IdentityColumn', 'CurrentIdentityValue', 'NextIdentityValue'],
         rows: [[table.name, identityColumn.name, valueToText(currentValue), String(identityColumn.identity.nextValue)]],
@@ -2866,11 +2880,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     if (coercedReseed === null || typeof coercedReseed !== 'number') {
       return errorResult(state, start, 'قيمة RESEED غير صالحة لعمود IDENTITY.');
     }
-    // SQL Server uses the reseed value itself for the first insert into an empty table;
-    // for a non-empty table, the next generated value is reseed + increment.
-    identityColumn.identity.nextValue = table.rows.length === 0
-      ? coercedReseed
-      : coercedReseed + identityColumn.identity.increment;
+    // An empty table after DELETE still retains identity history; TRUNCATE resets it.
+    // Infer history for older saved workspaces that predate the explicit flag.
+    const hasGeneratedValue = identityColumn.identity.hasGeneratedValue
+      ?? (table.rows.length > 0 || identityColumn.identity.nextValue !== identityColumn.identity.seed);
+    identityColumn.identity.nextValue = hasGeneratedValue
+      ? coercedReseed + identityColumn.identity.increment
+      : coercedReseed;
+    identityColumn.identity.lastValue = coercedReseed;
+    identityColumn.identity.hasGeneratedValue = hasGeneratedValue;
     return success(state, start, {
       messages: ['تمت إعادة ضبط عداد IDENTITY في الجدول "' + tableName + '". القيمة التالية: ' + identityColumn.identity.nextValue + '.'],
     });
@@ -2994,7 +3012,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
         unique: /\bUNIQUE\b/i.test(rest),
         defaultValue: defaultMatch ? parseValue(defaultMatch[1].trim()) : undefined,
         ...(namedDefaultMatch ? { defaultConstraintName: cleanName(namedDefaultMatch[1]) } : {}),
-        ...(identityMatch ? { identity: { seed: identitySeed, increment: identityIncrement, nextValue: identitySeed } } : {}),
+        ...(identityMatch ? {
+          identity: {
+            seed: identitySeed,
+            increment: identityIncrement,
+            nextValue: identitySeed,
+            lastValue: null,
+            hasGeneratedValue: false,
+          },
+        } : {}),
       });
     }
     const duplicateColumn = columns.find((column, index) => columns.some((other, otherIndex) => otherIndex !== index && keyOf(other.name) === keyOf(column.name)));
@@ -3392,7 +3418,11 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     const removedRows = table.rows.length;
     table.rows = [];
     for (const column of table.columns) {
-      if (column.identity) column.identity.nextValue = column.identity.seed;
+      if (column.identity) {
+        column.identity.nextValue = column.identity.seed;
+        column.identity.lastValue = null;
+        column.identity.hasGeneratedValue = false;
+      }
     }
     return success(state, start, { affectedRows: removedRows, messages: ['تم تفريغ الجدول "' + tableName + '" بنجاح. (' + removedRows + ' صفوف محذوفة)'] });
   }
@@ -3414,6 +3444,8 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
 
     const pendingRows: StoredRow[] = [];
     const identityNextValues = new Map<ColumnModel, number>();
+    const identityLastValues = new Map<ColumnModel, number>();
+    const identityInsertedColumns = new Set<ColumnModel>();
     const identityInsertEnabled = state.identityInsertTable === keyOf(database.name + '.' + table.name);
 
     for (const tuple of tuples) {
@@ -3442,11 +3474,15 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
                 column,
                 shouldAdvance ? numericValue + column.identity.increment : currentNext
               );
+              if (shouldAdvance) identityLastValues.set(column, numericValue);
+              identityInsertedColumns.add(column);
               row[column.name] = explicitValue;
             } else {
               const generatedValue = coerceColumnValue(currentNext, column);
               row[column.name] = generatedValue;
               identityNextValues.set(column, currentNext + column.identity.increment);
+              identityLastValues.set(column, currentNext);
+              identityInsertedColumns.add(column);
             }
           } else {
             const inputValue = index >= 0 ? values[index] : column.defaultValue ?? null;
@@ -3470,6 +3506,12 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     table.rows.push(...pendingRows);
     for (const [column, nextValue] of identityNextValues) {
       if (column.identity) column.identity.nextValue = nextValue;
+    }
+    for (const column of identityInsertedColumns) {
+      if (!column.identity) continue;
+      column.identity.hasGeneratedValue = true;
+      const lastValue = identityLastValues.get(column);
+      if (lastValue !== undefined) column.identity.lastValue = lastValue;
     }
     const inserted = pendingRows.length;
     return success(state, start, { affectedRows: inserted, messages: [`(${inserted} rows affected)`] });

@@ -1392,3 +1392,61 @@ test('EXEC sp_help reports a clear error for an unknown object', () => {
   assert.ok(result.result.errors.length > 0);
   assert.match(result.result.errors[0], /غير موجود/);
 });
+
+
+test('DBCC CHECKIDENT accepts the default form and preserves the current identity value after DELETE', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityHistoryDB;\nUSE IdentityHistoryDB;\nCREATE TABLE Jobs (Id INT IDENTITY(5,5) PRIMARY KEY, Name NVARCHAR(30));\nINSERT INTO Jobs (Name) VALUES ('First'), ('Second');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const deleted = executeScript(created.state, 'DELETE FROM Jobs;');
+  assert.deepStrictEqual(deleted.result.errors, []);
+  assert.strictEqual(deleted.state.databases.identityhistorydb.tables.jobs.rows.length, 0);
+
+  const inspected = executeScript(deleted.state, "DBCC CHECKIDENT ('Jobs');");
+  assert.deepStrictEqual(inspected.result.errors, []);
+  assert.deepStrictEqual(inspected.result.rows, [['10', 'Id', '10', '15']]);
+
+  const reseeded = executeScript(inspected.state, "DBCC CHECKIDENT ('Jobs', RESEED, 100);");
+  assert.deepStrictEqual(reseeded.result.errors, []);
+  const inserted = executeScript(reseeded.state, "INSERT INTO Jobs (Name) VALUES ('AfterDelete');");
+  assert.deepStrictEqual(inserted.result.errors, []);
+  const selected = executeScript(inserted.state, 'SELECT Id FROM Jobs;');
+  assert.deepStrictEqual(selected.result.rows, [['105']]);
+});
+
+test('TRUNCATE TABLE resets IDENTITY history so the next row uses the original seed', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityTruncateDB;\nUSE IdentityTruncateDB;\nCREATE TABLE Jobs (Id INT IDENTITY(7,3) PRIMARY KEY, Name NVARCHAR(20));\nINSERT INTO Jobs (Name) VALUES ('First'), ('Second');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+  const truncated = executeScript(created.state, 'TRUNCATE TABLE Jobs;');
+  assert.deepStrictEqual(truncated.result.errors, []);
+  assert.strictEqual(truncated.state.databases.identitytruncatedb.tables.jobs.columns[0].identity?.hasGeneratedValue, false);
+
+  const inserted = executeScript(truncated.state, "INSERT INTO Jobs (Name) VALUES ('AfterTruncate');");
+  assert.deepStrictEqual(inserted.result.errors, []);
+  const selected = executeScript(inserted.state, 'SELECT Id FROM Jobs;');
+  assert.deepStrictEqual(selected.result.rows, [['7']]);
+});
+
+test('IDENTITY_INSERT advances the counter for higher explicit values and respects the following automatic value', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE IdentityInsertDB;\nUSE IdentityInsertDB;\nCREATE TABLE Jobs (Id INT IDENTITY(1,1) PRIMARY KEY, Name NVARCHAR(20));\nINSERT INTO Jobs (Name) VALUES ('One'), ('Two');"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const explicit = executeScript(
+    created.state,
+    "SET IDENTITY_INSERT Jobs ON;\nINSERT INTO Jobs (Id, Name) VALUES (50, 'Fifty');\nSET IDENTITY_INSERT Jobs OFF;\nINSERT INTO Jobs (Name) VALUES ('Next');"
+  );
+  assert.deepStrictEqual(explicit.result.errors, []);
+  const selected = executeScript(explicit.state, 'SELECT Id FROM Jobs ORDER BY Id;');
+  assert.deepStrictEqual(selected.result.errors, []);
+  assert.deepStrictEqual(selected.result.rows, [['1'], ['2'], ['50'], ['51']]);
+  assert.strictEqual(explicit.state.databases.identityinsertdb.tables.jobs.columns[0].identity?.lastValue, 51);
+});
