@@ -1407,7 +1407,7 @@ test('DBCC CHECKIDENT accepts the default form and preserves the current identit
 
   const inspected = executeScript(deleted.state, "DBCC CHECKIDENT ('Jobs');");
   assert.deepStrictEqual(inspected.result.errors, []);
-  assert.deepStrictEqual(inspected.result.rows, [['10', 'Id', '10', '15']]);
+  assert.deepStrictEqual(inspected.result.rows, [['Jobs', 'Id', '10', '15']]);
 
   const reseeded = executeScript(inspected.state, "DBCC CHECKIDENT ('Jobs', RESEED, 100);");
   assert.deepStrictEqual(reseeded.result.errors, []);
