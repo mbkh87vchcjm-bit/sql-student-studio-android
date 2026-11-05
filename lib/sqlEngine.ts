@@ -3659,6 +3659,14 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     return success(state, start, { affectedRows: affected, messages: [`(${affected} rows affected)`] });
   }
 
+  if (/^(?:CREATE\s+(?:LOGIN|USER|ROLE)\b|ALTER\s+(?:LOGIN|USER|ROLE)\b|DROP\s+(?:LOGIN|USER|ROLE)\b|GRANT\b|DENY\b|REVOKE\b|EXEC(?:UTE)?\s+sp_(?:addlogin|adduser|addrole|grantdbaccess)\b)/i.test(sql)) {
+    return errorResult(
+      state,
+      start,
+      'إدارة المستخدمين والأدوار والصلاحيات (LOGIN/USER/ROLE/GRANT/DENY/REVOKE) غير مطبقة. هذا المحرك محاكاة تعليمية محلية بلا مصادقة أو نموذج صلاحيات، ولا يجوز اعتباره حدًا أمنيًا.'
+    );
+  }
+
   return errorResult(state, start, `تعليمة غير مدعومة: ${sql.split(/\s+/).slice(0, 3).join(' ')}`);
 }
 

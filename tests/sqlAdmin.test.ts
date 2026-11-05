@@ -1518,3 +1518,28 @@ test('CREATE OR ALTER VIEW creates a view, updates it, and preserves the last va
   assert.deepStrictEqual(preserved.result.errors, []);
   assert.deepStrictEqual(preserved.result.rows, [['Sara']]);
 });
+
+
+test('SQL Server security commands are rejected explicitly because the simulator has no authentication or permission model', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE SecurityBoundaryDB;\nUSE SecurityBoundaryDB;\nCREATE TABLE Students (Id INT PRIMARY KEY, Name NVARCHAR(20));"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const commands = [
+    'CREATE USER StudentUser;',
+    'CREATE ROLE StudentRole;',
+    'GRANT SELECT ON Students TO StudentRole;',
+    'DENY DELETE ON Students TO StudentRole;',
+    'REVOKE SELECT ON Students FROM StudentRole;',
+    "CREATE LOGIN StudentLogin WITH PASSWORD = 'not-a-real-password';",
+  ];
+
+  for (const command of commands) {
+    const rejected = executeScript(created.state, command);
+    assert.ok(rejected.result.errors.length > 0, command + ' must not be silently accepted.');
+    assert.match(rejected.result.errors[0], /غير مطبقة.*بلا مصادقة أو نموذج صلاحيات/);
+    assert.strictEqual(rejected.state.databases.securityboundarydb.tables.students.rows.length, 0);
+  }
+});
