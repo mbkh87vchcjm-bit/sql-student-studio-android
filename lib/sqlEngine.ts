@@ -2429,7 +2429,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   }
 
   // 2. DROP DATABASE [IF EXISTS]
-  match = sql.match(/^DROP\s+DATABASE\s+(IF\s+EXISTS\s+)?([[\\]\w-]+)$/i);
+  match = sql.match(/^DROP\s+DATABASE\s+(IF\s+EXISTS\s+)?([[\]\w-]+)$/i);
   if (match) {
     const ifExists = Boolean(match[1]);
     const name = cleanName(match[2]);
@@ -2452,7 +2452,7 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
   }
 
   // 3. USE DATABASE
-  match = sql.match(/^USE\s+([[\\]\w-]+)$/i);
+  match = sql.match(/^USE\s+([[\]\w-]+)$/i);
   if (match) {
     const name = cleanName(match[1]);
     const targetDatabase = state.databases[keyOf(name)];
