@@ -2752,6 +2752,56 @@ function executeStatement(state: EngineState, statement: string): ExecutionResul
     });
   }
 
+  // CREATE OR ALTER VIEW: create when absent, otherwise replace the validated definition.
+  match = sql.match(/^CREATE\s+OR\s+ALTER\s+VIEW\s+([\[\]\w.-]+)\s+AS\s+([\s\S]+)$/i);
+  if (match) {
+    const viewName = cleanName(match[1]);
+    const viewKey = keyOf(viewName);
+    if (tableFor(database, viewName)) {
+      return errorResult(state, start, 'لا يمكن إنشاء أو تعديل العرض "' + viewName + '" لأن الاسم مستخدم لجدول.');
+    }
+
+    const definition = match[2].trim();
+    if (!/^SELECT\b/i.test(definition)) {
+      return errorResult(state, start, 'يجب أن يكون تعريف VIEW عبارة SELECT.');
+    }
+
+    database.views ??= {};
+    const existingView = database.views[viewKey];
+    const previousDefinition = existingView?.definition;
+    if (existingView) existingView.definition = definition;
+
+    let validation: SelectInternalResult;
+    try {
+      validation = executeQueryWithSetOperators(definition, state);
+    } catch (error) {
+      if (existingView && previousDefinition !== undefined) existingView.definition = previousDefinition;
+      return errorResult(state, start, error instanceof Error ? error.message : String(error));
+    }
+
+    if (validation.error) {
+      if (existingView && previousDefinition !== undefined) existingView.definition = previousDefinition;
+      return errorResult(state, start, 'تعريف VIEW غير صالح: ' + validation.error);
+    }
+
+    const duplicateColumns = validation.columns.filter((column, index) =>
+      validation.columns.findIndex((candidate) => keyOf(candidate) === keyOf(column)) !== index
+    );
+    if (duplicateColumns.length) {
+      if (existingView && previousDefinition !== undefined) existingView.definition = previousDefinition;
+      if (!existingView && Object.keys(database.views).length === 0) delete database.views;
+      return errorResult(state, start, 'أسماء أعمدة العرض يجب أن تكون فريدة؛ الاسم المكرر: "' + duplicateColumns[0] + '".');
+    }
+
+    if (existingView) {
+      existingView.columns = validation.columns;
+      return success(state, start, { messages: ['تم تعديل تعريف العرض "' + viewName + '" باستخدام CREATE OR ALTER VIEW.'] });
+    }
+
+    database.views[viewKey] = { name: viewName, definition, columns: validation.columns };
+    return success(state, start, { messages: ['تم إنشاء العرض "' + viewName + '" باستخدام CREATE OR ALTER VIEW.'] });
+  }
+
   // CREATE / ALTER VIEW: persist a validated SELECT definition, not a snapshot of rows.
   match = sql.match(/^CREATE\s+VIEW\s+([\[\]\w.-]+)\s+AS\s+([\s\S]+)$/i);
   if (match) {

@@ -1487,3 +1487,34 @@ test('CREATE INDEX rejects names already reserved by primary and unique constrai
   assert.match(uniqueCollision.result.errors[0], /مستخدم بالفعل/);
   assert.strictEqual(uniqueCollision.state.databases.indexnamedb.tables.products.indexes, undefined);
 });
+
+
+test('CREATE OR ALTER VIEW creates a view, updates it, and preserves the last valid definition on failure', () => {
+  const created = executeScript(
+    EMPTY_STATE,
+    "CREATE DATABASE CreateOrAlterViewDB;\nUSE CreateOrAlterViewDB;\nCREATE TABLE Students (Id INT PRIMARY KEY, Name NVARCHAR(30), Grade INT);\nINSERT INTO Students (Id, Name, Grade) VALUES (1, 'Ali', 80), (2, 'Sara', 95);\nCREATE OR ALTER VIEW PassingStudents AS SELECT Id, Name FROM Students WHERE Grade >= 60;"
+  );
+  assert.deepStrictEqual(created.result.errors, []);
+
+  const firstQuery = executeScript(created.state, 'SELECT Name FROM PassingStudents ORDER BY Name;');
+  assert.deepStrictEqual(firstQuery.result.errors, []);
+  assert.deepStrictEqual(firstQuery.result.rows, [['Ali'], ['Sara']]);
+
+  const altered = executeScript(
+    firstQuery.state,
+    'CREATE OR ALTER VIEW PassingStudents AS SELECT Id, Name FROM Students WHERE Grade >= 90;'
+  );
+  assert.deepStrictEqual(altered.result.errors, []);
+  const secondQuery = executeScript(altered.state, 'SELECT Name FROM PassingStudents ORDER BY Name;');
+  assert.deepStrictEqual(secondQuery.result.errors, []);
+  assert.deepStrictEqual(secondQuery.result.rows, [['Sara']]);
+
+  const invalid = executeScript(
+    secondQuery.state,
+    'CREATE OR ALTER VIEW PassingStudents AS SELECT MissingColumn FROM Students;'
+  );
+  assert.ok(invalid.result.errors.length > 0);
+  const preserved = executeScript(invalid.state, 'SELECT Name FROM PassingStudents;');
+  assert.deepStrictEqual(preserved.result.errors, []);
+  assert.deepStrictEqual(preserved.result.rows, [['Sara']]);
+});
